@@ -40,6 +40,10 @@ const CATEGORY_LABELS = {
   'computer-science': 'Computer Science',
   cinema: 'Cinema',
   'cinema-history': 'Cinema History',
+  feminism: 'Feminism',
+  'history-facts': 'History',
+  neurobiology: 'Neurobiology',
+  'anthropology-facts': 'Anthropology',
 };
 
 const PAGE_SIZE = 15;
@@ -68,6 +72,10 @@ const FEED_SOURCES = [
   'computer-science',
   'cinema',
   'cinema-history',
+  'feminism',
+  'history-facts',
+  'neurobiology',
+  'anthropology-facts',
 ];
 const FEED_SOURCE_BATCH = 3;
 const WIKI_SEARCH = {
@@ -85,6 +93,14 @@ const WIKI_SEARCH = {
     'cinema OR film OR filmmaker OR director OR screenwriter OR cinematography OR "agnes varda" OR "chloe zhao" OR "kathryn bigelow" OR "greta gerwig" OR "ava duvernay" OR "sofia coppola" OR "satyajit ray" OR "akira kurosawa" OR "hayao miyazaki" OR "francois truffaut"',
   'cinema-history':
     'history of cinema OR film history OR silent film OR german expressionism OR french new wave OR italian neorealism OR hollywood golden age OR "new hollywood" OR "parallel cinema" OR "iranian new wave" OR "japanese cinema history" OR "african cinema" OR "latin american cinema"',
+  feminism:
+    'feminism OR feminist theory OR gender equality OR women rights OR suffrage OR intersectional feminism OR simone de beauvoir OR bell hooks OR judith butler OR angela davis OR gloria steinem OR emma goldman OR roxane gay',
+  'history-facts':
+    'curious history facts OR weird history OR historical trivia OR little known history OR surprising events in history OR unusual inventions history OR strange ancient practices',
+  neurobiology:
+    'neurobiology OR neuroscience OR brain science OR neurons OR synapse OR neuroplasticity OR hippocampus OR amygdala OR prefrontal cortex OR neurotransmitters OR oliver sacks OR eric kandel',
+  'anthropology-facts':
+    'curious anthropologic facts OR anthropology facts OR cultural anthropology OR human evolution OR archaeology discoveries OR ancient cultures OR rites and rituals OR kinship systems OR margaret mead OR claude levi strauss OR mary douglas',
 };
 const NATURAL_VOICE_HINTS = [
   'samantha',
@@ -200,6 +216,55 @@ function pickPreferredVoice(voices, preferredVoiceUri) {
   });
 
   return naturalMatch || voicePool[0] || voices[0] || null;
+}
+
+function getItemSource(item) {
+  if (item?.source) {
+    return item.source;
+  }
+
+  const id = item?.id || '';
+  return FEED_SOURCES.find((sourceKey) => id.startsWith(`${sourceKey}-`)) || 'unknown';
+}
+
+function pickBalancedFeedItems(items, maxItems) {
+  if (!items.length || maxItems <= 0) {
+    return [];
+  }
+
+  const buckets = new Map();
+  items.forEach((item) => {
+    const source = getItemSource(item);
+    if (!buckets.has(source)) {
+      buckets.set(source, []);
+    }
+    buckets.get(source).push(item);
+  });
+
+  const picked = [];
+  const sourceKeys = shuffleArray(Array.from(buckets.keys()).filter((key) => key !== 'unknown'));
+
+  sourceKeys.forEach((source) => {
+    if (picked.length >= maxItems) {
+      return;
+    }
+
+    const sourceItems = buckets.get(source);
+    const firstItem = sourceItems?.shift();
+    if (firstItem) {
+      picked.push(firstItem);
+    }
+  });
+
+  const remainingPool = shuffleArray(Array.from(buckets.values()).flat());
+  for (const item of remainingPool) {
+    if (picked.length >= maxItems) {
+      break;
+    }
+    picked.push(item);
+  }
+
+  return picked;
 }
 
 function getVoiceColor(voiceIndex, totalVoices) {
@@ -426,9 +491,7 @@ export default function HomePage() {
   const fetchBatch = useCallback(
     async (targetCategory) => {
       if (targetCategory === 'art') {
-        let artCursor = cursorByCategory[targetCategory];
-
-        if (!artCursor?.ids) {
+        const fetchArtIds = async () => {
           const idSet = new Set();
 
           // Prefer Met highlights with a rotating set of known artists/works.
@@ -474,45 +537,87 @@ export default function HomePage() {
             }
           }
 
-          artCursor = { ids: Array.from(idSet), index: 0 };
+          return Array.from(idSet);
+        };
+
+        let artCursor = cursorByCategory[targetCategory];
+
+        if (!artCursor?.ids) {
+          artCursor = { ids: await fetchArtIds(), index: 0 };
         }
 
-        const slice = artCursor.ids.slice(artCursor.index, artCursor.index + PAGE_SIZE_ART);
-        if (!slice.length) {
-          return { items: [], cursor: artCursor };
+        let artIds = artCursor.ids;
+        let artIndex = artCursor.index;
+
+        if (artIndex >= artIds.length || !artIds.length) {
+          artIds = await fetchArtIds();
+          artIndex = 0;
         }
 
-        const detailRequests = slice.map((id) =>
-          fetch(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${id}`),
-        );
-        const detailResponses = await Promise.all(detailRequests);
-        const detailJson = await Promise.all(detailResponses.map((response) => response.json()));
+        const maxScans = 5;
+        let scans = 0;
 
-        const categoryItems = detailJson
-          .map((item) => ({
-            id: `art-${item.objectID}`,
-            title: item.title || 'Untitled work',
-            detail: [
-              item.artistDisplayName && `Artist: ${item.artistDisplayName}`,
-              item.objectDate && `Date: ${item.objectDate}`,
-              item.medium && `Medium: ${item.medium}`,
-            ]
-              .filter(Boolean)
-              .join(' - '),
-            tag: `${item.department || 'Met Collection'} - ${CATEGORY_LABELS.art}`,
-            imageUrl: item.primaryImageSmall || item.primaryImage || null,
-            webUrl: item.objectURL || null,
-            highlight: Boolean(item.isHighlight),
-          }))
-          .filter((item) => item.imageUrl)
-          // Prefer highlighted / better-known works first.
-          .sort((a, b) => Number(b.highlight) - Number(a.highlight));
+        while (scans < maxScans) {
+          if (artIndex >= artIds.length) {
+            artIds = await fetchArtIds();
+            artIndex = 0;
+            if (!artIds.length) {
+              break;
+            }
+          }
+
+          const slice = artIds.slice(artIndex, artIndex + PAGE_SIZE_ART);
+          if (!slice.length) {
+            break;
+          }
+
+          const detailRequests = slice.map((id) =>
+            fetch(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${id}`),
+          );
+          const detailResponses = await Promise.all(detailRequests);
+          const detailJson = await Promise.all(detailResponses.map((response) => response.json()));
+
+          const categoryItems = detailJson
+            .map((item) => ({
+              id: `art-${item.objectID}`,
+              source: targetCategory,
+              title: item.title || 'Untitled work',
+              detail: [
+                item.artistDisplayName && `Artist: ${item.artistDisplayName}`,
+                item.objectDate && `Date: ${item.objectDate}`,
+                item.medium && `Medium: ${item.medium}`,
+              ]
+                .filter(Boolean)
+                .join(' - '),
+              tag: `${item.department || 'Met Collection'} - ${CATEGORY_LABELS.art}`,
+              imageUrl: item.primaryImageSmall || item.primaryImage || null,
+              webUrl: item.objectURL || null,
+              highlight: Boolean(item.isHighlight),
+            }))
+            .filter((item) => item.imageUrl)
+            // Prefer highlighted / better-known works first.
+            .sort((a, b) => Number(b.highlight) - Number(a.highlight));
+
+          const nextIndex = artIndex + PAGE_SIZE_ART;
+          if (categoryItems.length) {
+            return {
+              items: categoryItems,
+              cursor: {
+                ids: artIds,
+                index: nextIndex,
+              },
+            };
+          }
+
+          artIndex = nextIndex;
+          scans += 1;
+        }
 
         return {
-          items: categoryItems,
+          items: [],
           cursor: {
-            ids: artCursor.ids,
-            index: artCursor.index + PAGE_SIZE_ART,
+            ids: artIds,
+            index: artIndex,
           },
         };
       }
@@ -538,6 +643,7 @@ export default function HomePage() {
           return {
             items: summaries.map((item) => ({
               id: `${targetCategory}-${item.pageid}`,
+              source: targetCategory,
               title: item.title,
               detail: sanitizeWikiText(item.extract),
               detailFull: null,
@@ -692,10 +798,11 @@ export default function HomePage() {
           ...seenItemsRef.current.map((item) => item.id),
         ]);
         const unseenItems = nextItems.filter((item) => !previouslySeenIds.has(item.id));
-        const itemsToAdd = (unseenItems.length ? unseenItems : nextItems).slice(
-          0,
-          LOAD_MORE_BATCH_MAX,
-        );
+        const candidateItems = unseenItems.length ? unseenItems : nextItems;
+        const itemsToAdd =
+          targetCategory === 'feed'
+            ? pickBalancedFeedItems(candidateItems, LOAD_MORE_BATCH_MAX)
+            : candidateItems.slice(0, LOAD_MORE_BATCH_MAX);
 
         setItemsByCategory((prev) => {
           const merged = mergeItems(prev[targetCategory] || [], itemsToAdd);
