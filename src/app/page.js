@@ -1433,9 +1433,9 @@ export default function HomePage() {
   return (
     <main className={`page${isDarkMode ? ' pageDark' : ''}${isLargeText ? ' pageLargeText' : ''}`}>
       <header className="headerWrap">
-        <p className="kicker">Smortscroll</p>
-        <h1 className="title">Endless, but mindful.</h1>
-        <p className="subtitle">A calm feed of facts, paintings, and history that keeps flowing.</p>
+        <p className="kicker"></p>
+        <h1 className="title">...</h1>
+        <p className="subtitle"></p>
 
         <div className="topActions">
           <div className="topGroup">
