@@ -354,6 +354,36 @@ body {
         line-height: 1.45;
 }
 
+.stateLoadingRow {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+}
+
+.loadingBookSpinner {
+        width: 34px;
+        height: 34px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        color: var(--accent);
+        animation: sheetSpinner 1s linear infinite;
+        flex: 0 0 auto;
+}
+
+@keyframes sheetSpinner {
+        from {
+                transform: rotate(0deg);
+        }
+
+        to {
+                transform: rotate(360deg);
+        }
+}
+
 .pageDark .stateTitle {
         color: var(--accent);
 }

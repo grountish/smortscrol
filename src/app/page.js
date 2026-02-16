@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BookText,
   Eye,
   Heart,
   Highlighter,
@@ -62,6 +63,7 @@ const VOICE_STORAGE_KEY = 'smortscroll:voice-uri';
 const CURSOR_STORAGE_KEY = 'smortscroll:cursor';
 const THEME_STORAGE_KEY = 'smortscroll:theme';
 const TEXT_SIZE_STORAGE_KEY = 'smortscroll:text-size';
+const TRIVIA_INSERT_EVERY = 5;
 const ART_QUERY = 'painting';
 const FEED_SOURCES = [
   'art',
@@ -313,6 +315,7 @@ export default function HomePage() {
   const loadMoreSentinelRef = useRef(null);
   const feedSourceOrderRef = useRef(shuffleArray(FEED_SOURCES));
   const feedSourceIndexRef = useRef(0);
+  const feedLoadCountRef = useRef(0);
   const lastScrollYRef = useRef(0);
 
   const items = useMemo(() => itemsByCategory[category] || [], [itemsByCategory, category]);
@@ -451,6 +454,44 @@ export default function HomePage() {
     const firstKey = pages ? Object.keys(pages)[0] : null;
     const page = firstKey ? pages[firstKey] : null;
     return page?.extract || null;
+  }, []);
+
+  const fetchRandomTriviaItem = useCallback(async () => {
+    const response = await fetch('/api/random-trivia', {
+      method: 'GET',
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      throw new Error(`Trivia request failed with status ${response.status}`);
+    }
+
+    const data = await response.json();
+    const triviaText = [
+      data?.trivia,
+      data?.fact,
+      data?.text,
+      data?.description,
+      data?.message,
+      data?.result,
+    ]
+      .filter((entry) => typeof entry === 'string' && entry.trim())
+      .map((entry) => entry.trim())[0];
+
+    if (!triviaText) {
+      return null;
+    }
+
+    return {
+      id: `trivia-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      source: 'trivia',
+      title: 'Random Fact',
+      detail: sanitizeWikiText(triviaText),
+      detailFull: null,
+      tag: '!',
+      webUrl: data?.sourceUrl || data?.url || null,
+      imageUrl: null,
+    };
   }, []);
 
   const updateItemById = useCallback((id, updates) => {
@@ -648,7 +689,7 @@ export default function HomePage() {
               detail: sanitizeWikiText(item.extract),
               detailFull: null,
               wikiTitle: item.title,
-              tag: `Wikipedia - ${CATEGORY_LABELS[targetCategory]}`,
+              tag: CATEGORY_LABELS[targetCategory],
               webUrl: item.content_urls?.desktop?.page || null,
               imageUrl: item.originalimage?.source || item.thumbnail?.source || null,
             })),
@@ -781,6 +822,18 @@ export default function HomePage() {
               return updates;
             });
           }
+
+          feedLoadCountRef.current += 1;
+          if (feedLoadCountRef.current % TRIVIA_INSERT_EVERY === 0) {
+            try {
+              const triviaItem = await fetchRandomTriviaItem();
+              if (triviaItem) {
+                nextItems = shuffleArray([triviaItem, ...nextItems]);
+              }
+            } catch {
+              // Ignore trivia API failures and continue with normal feed items.
+            }
+          }
         } else {
           const batch = await fetchBatch(targetCategory);
           nextItems = batch.items;
@@ -825,7 +878,7 @@ export default function HomePage() {
         setLoadingByCategory((prev) => ({ ...prev, [targetCategory]: false }));
       }
     },
-    [fetchBatch, getNextFeedSources],
+    [fetchBatch, fetchRandomTriviaItem, getNextFeedSources],
   );
 
   useEffect(() => {
@@ -1635,8 +1688,15 @@ export default function HomePage() {
 
         {loadingByCategory[category] ? (
           <div className="stateCard">
-            <p className="stateTitle">Loading more...</p>
-            <p className="stateDetail">We are grabbing another batch.</p>
+            <div className="stateLoadingRow" role="status" aria-live="polite">
+              <span className="loadingBookSpinner" aria-hidden="true">
+                <BookText size={18} />
+              </span>
+              <div>
+                <p className="stateTitle">Loading more...</p>
+                <p className="stateDetail">We are grabbing another batch.</p>
+              </div>
+            </div>
           </div>
         ) : null}
 
