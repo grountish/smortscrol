@@ -154,6 +154,37 @@ body {
         gap: 10px;
 }
 
+.mindfulScoreChip {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 6px;
+        border: 1px solid var(--line);
+        background: var(--chip);
+        color: var(--ink);
+        padding: 6px 10px;
+        border-radius: 999px;
+}
+
+.mindfulScoreLabel {
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 700;
+}
+
+.mindfulScoreValue {
+        font-size: 15px;
+        font-weight: 800;
+        line-height: 1;
+}
+
+.mindfulScoreChipNumber {
+        padding: 6px 8px;
+        min-width: 44px;
+        justify-content: center;
+}
+
 .topGroup {
         display: flex;
         flex-wrap: wrap;
@@ -469,7 +500,40 @@ body {
         margin: 0 auto;
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
+        flex-wrap: nowrap;
+}
+
+.bottomBar .topGroup,
+.bottomBar .tabs,
+.bottomBar .topControls {
+        flex-wrap: nowrap;
+}
+
+.bottomBar .topGroup {
+        gap: 8px;
+}
+
+.bottomBar .tabs {
+        gap: 6px;
+}
+
+.bottomBar .topControls {
+        gap: 4px;
+}
+
+.bottomBar .topDivider {
+        margin-inline: 0;
+}
+
+.bottomBar .tab,
+.bottomBar .installButton {
+        padding: 5px 8px;
+}
+
+.bottomBar .mindfulScoreChipNumber {
+        padding: 5px 7px;
+        min-width: 38px;
 }
 
 .pageDark .bottomBar {

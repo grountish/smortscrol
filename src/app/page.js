@@ -63,7 +63,16 @@ const VOICE_STORAGE_KEY = 'smortscroll:voice-uri';
 const CURSOR_STORAGE_KEY = 'smortscroll:cursor';
 const THEME_STORAGE_KEY = 'smortscroll:theme';
 const TEXT_SIZE_STORAGE_KEY = 'smortscroll:text-size';
+const MINDFUL_SCORE_STORAGE_KEY = 'smortscroll:mindful-score';
 const TRIVIA_INSERT_EVERY = 5;
+const MINDFUL_SCORE_MIN = 0;
+const MINDFUL_SCORE_MAX = 9999;
+const MINDFUL_SCROLL_SPEED_MEDIUM = 1200;
+const MINDFUL_SCROLL_SPEED_FAST = 1800;
+const MINDFUL_SCORE_PENALTY_MEDIUM = -1;
+const MINDFUL_SCORE_PENALTY_FAST = -2;
+const MINDFUL_SCORE_PASSIVE_INTERVAL = 15000;
+const MINDFUL_SCORE_PASSIVE_GAIN = 1;
 const ART_QUERY = 'painting';
 const FEED_SOURCES = [
   'art',
@@ -165,6 +174,20 @@ function getShortText(text) {
   }
 
   return `${text.slice(0, SHORT_TEXT_LIMIT).trimEnd()}...`;
+}
+
+function estimateReadingLines(item) {
+  const text = [item?.title, item?.description, item?.summary, item?.content]
+    .filter((part) => typeof part === 'string' && part.trim())
+    .join(' ')
+    .trim();
+
+  if (!text) {
+    return 2;
+  }
+
+  const estimated = Math.ceil(text.length / 80);
+  return Math.min(36, Math.max(2, estimated));
 }
 
 function getParagraphs(text) {
@@ -298,6 +321,7 @@ export default function HomePage() {
   const [selectedVoiceUri, setSelectedVoiceUri] = useState(null);
   const [showBottomBar, setShowBottomBar] = useState(false);
   const [isAmbientPlaying, setIsAmbientPlaying] = useState(false);
+  const [mindfulScore, setMindfulScore] = useState(0);
 
   const inFlightRef = useRef({});
   const seenIdsRef = useRef(new Set());
@@ -317,6 +341,8 @@ export default function HomePage() {
   const feedSourceIndexRef = useRef(0);
   const feedLoadCountRef = useRef(0);
   const lastScrollYRef = useRef(0);
+  const lastScrollAtRef = useRef(0);
+  const mindfulScoreRef = useRef(0);
 
   const items = useMemo(() => itemsByCategory[category] || [], [itemsByCategory, category]);
 
@@ -331,6 +357,18 @@ export default function HomePage() {
 
     return items.filter((item) => !hiddenIds.has(item.id) || favoriteIds.has(item.id));
   }, [category, items, hiddenIds, favoriteIds, seenItems, favoriteItems]);
+
+  const adjustMindfulScore = useCallback((delta) => {
+    if (!Number.isFinite(delta) || delta === 0) {
+      return;
+    }
+
+    setMindfulScore((prev) => {
+      const next = Math.max(MINDFUL_SCORE_MIN, Math.min(MINDFUL_SCORE_MAX, prev + delta));
+      mindfulScoreRef.current = next;
+      return next;
+    });
+  }, []);
 
   const queueSeenSave = useCallback(() => {
     if (saveTimeoutRef.current || typeof window === 'undefined') {
@@ -430,8 +468,12 @@ export default function HomePage() {
       viewedIdsRef.current.add(item.id);
       addSeenItems([item]);
       queueSeenSave();
+
+      const estimatedLines = estimateReadingLines(item);
+      const readGain = Math.min(10, 1 + Math.round(estimatedLines * 0.35));
+      adjustMindfulScore(readGain);
     },
-    [addSeenItems, queueSeenSave],
+    [addSeenItems, adjustMindfulScore, queueSeenSave],
   );
 
   const clearSeenHistory = useCallback(() => {
@@ -990,6 +1032,37 @@ export default function HomePage() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      const rawValue = window.localStorage.getItem(MINDFUL_SCORE_STORAGE_KEY);
+      const parsedValue = Number.parseInt(rawValue || '', 10);
+      if (Number.isFinite(parsedValue)) {
+        const normalized = Math.max(MINDFUL_SCORE_MIN, Math.min(MINDFUL_SCORE_MAX, parsedValue));
+        mindfulScoreRef.current = normalized;
+        setMindfulScore(normalized);
+      }
+    } catch {
+      // Ignore score restoration failures.
+    }
+  }, []);
+
+  useEffect(() => {
+    mindfulScoreRef.current = mindfulScore;
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(MINDFUL_SCORE_STORAGE_KEY, String(mindfulScore));
+    } catch {
+      // Ignore score persistence failures.
+    }
+  }, [mindfulScore]);
   useEffect(() => {
     if (typeof window === 'undefined') {
       return undefined;
@@ -1009,12 +1082,25 @@ export default function HomePage() {
       return;
     }
 
+    lastScrollAtRef.current = Date.now();
+
     const onScroll = () => {
+      const now = Date.now();
+      const elapsed = Math.max(16, now - lastScrollAtRef.current);
       const currentY = window.scrollY;
       const delta = currentY - lastScrollYRef.current;
       const scrollingUp = delta < -6;
       const scrollingDown = delta > 6;
       const beyondHeader = currentY > 120;
+      const speed = Math.abs(delta) * (1000 / elapsed);
+
+      if (category === 'feed') {
+        if (speed >= MINDFUL_SCROLL_SPEED_FAST) {
+          adjustMindfulScore(MINDFUL_SCORE_PENALTY_FAST);
+        } else if (speed >= MINDFUL_SCROLL_SPEED_MEDIUM) {
+          adjustMindfulScore(MINDFUL_SCORE_PENALTY_MEDIUM);
+        }
+      }
 
       if (scrollingUp && beyondHeader) {
         setShowBottomBar(true);
@@ -1022,6 +1108,7 @@ export default function HomePage() {
         setShowBottomBar(false);
       }
 
+      lastScrollAtRef.current = now;
       lastScrollYRef.current = currentY;
     };
 
@@ -1029,7 +1116,25 @@ export default function HomePage() {
     return () => {
       window.removeEventListener('scroll', onScroll);
     };
-  }, []);
+  }, [adjustMindfulScore, category]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || category !== 'feed') {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') {
+        return;
+      }
+
+      adjustMindfulScore(MINDFUL_SCORE_PASSIVE_GAIN);
+    }, MINDFUL_SCORE_PASSIVE_INTERVAL);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [adjustMindfulScore, category]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -1438,6 +1543,11 @@ export default function HomePage() {
         <p className="subtitle"></p>
 
         <div className="topActions">
+          <div className="mindfulScoreChip" aria-live="polite">
+            <span className="mindfulScoreLabel">Mindful</span>
+            <span className="mindfulScoreValue">{mindfulScore}</span>
+          </div>
+
           <div className="topGroup">
             <div className="tabs" role="tablist" aria-label="Feed categories">
               {CATEGORIES.map((tab) => {
@@ -1796,6 +1906,13 @@ export default function HomePage() {
                 title={isLargeText ? 'Text: normal' : 'Text: larger'}>
                 <Type size={CONTROL_ICON_SIZE} aria-hidden="true" />
               </button>
+
+              <div
+                className="mindfulScoreChip mindfulScoreChipNumber"
+                aria-live="polite"
+                aria-label={`Mindful score ${mindfulScore}`}>
+                <span className="mindfulScoreValue">{mindfulScore}</span>
+              </div>
             </div>
           </div>
         </div>
