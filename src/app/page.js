@@ -1,6 +1,18 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Eye,
+  Heart,
+  Highlighter,
+  Home,
+  Infinity as InfinityIcon,
+  Moon,
+  Square,
+  Sun,
+  Type,
+  Volume2,
+} from 'lucide-react';
 import curatedArtTerms from '../data/art_highlights.json';
 
 const CATEGORIES = [
@@ -8,6 +20,12 @@ const CATEGORIES = [
   { key: 'fav', label: 'Fav' },
   { key: 'seen', label: 'Seen' },
 ];
+
+const TAB_ICONS = {
+  feed: InfinityIcon,
+  fav: Heart,
+  seen: Eye,
+};
 
 const CATEGORY_LABELS = {
   feed: 'Feed',
@@ -24,6 +42,9 @@ const CATEGORY_LABELS = {
 const PAGE_SIZE = 15;
 const PAGE_SIZE_ART = 10;
 const ART_CURATED_BATCH = 12;
+const CONTROL_ICON_SIZE = 16;
+const WIKI_PAGE_SIZE = 20;
+const WIKI_RANDOM_START_MAX = 60;
 const SHORT_TEXT_LIMIT = 160;
 const HIDDEN_STORAGE_KEY = 'smortscroll:hidden-ids';
 const SEEN_ITEMS_STORAGE_KEY = 'smortscroll:seen-items';
@@ -117,6 +138,36 @@ function getShortText(text) {
   return `${text.slice(0, SHORT_TEXT_LIMIT).trimEnd()}...`;
 }
 
+function getParagraphs(text) {
+  if (!text) {
+    return [];
+  }
+
+  return text
+    .split(/\n\s*\n+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function sanitizeWikiText(text) {
+  if (!text) {
+    return '';
+  }
+
+  // Replace heading-style = separators with newlines to preserve breaks.
+  const withoutEquals = text.replace(/=+/g, '\n\n');
+
+  // Normalize newlines, trim each line, collapse intra-line spaces, keep blank lines.
+  const normalized = withoutEquals
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .join('\n');
+
+  // Collapse runs of 3+ newlines to double newlines for paragraph splitting.
+  return normalized.replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function pickPreferredVoice(voices, preferredVoiceUri) {
   if (!voices.length) {
     return null;
@@ -162,6 +213,7 @@ export default function HomePage() {
   const [speakingItemId, setSpeakingItemId] = useState(null);
   const [availableVoices, setAvailableVoices] = useState([]);
   const [selectedVoiceUri, setSelectedVoiceUri] = useState(null);
+  const [showBottomBar, setShowBottomBar] = useState(false);
 
   const inFlightRef = useRef({});
   const seenIdsRef = useRef(new Set());
@@ -175,6 +227,7 @@ export default function HomePage() {
   const bootstrappedFeedRef = useRef(false);
   const cardRefs = useRef({});
   const readContentRefs = useRef({});
+  const lastScrollYRef = useRef(0);
 
   const items = useMemo(() => itemsByCategory[category] || [], [itemsByCategory, category]);
 
@@ -340,7 +393,7 @@ export default function HomePage() {
       try {
         const fullText = await fetchWikiFullText(item.wikiTitle);
         if (fullText) {
-          updateItemById(item.id, { detailFull: fullText });
+          updateItemById(item.id, { detailFull: sanitizeWikiText(fullText) });
         }
       } finally {
         setLoadingFullText((prev) => ({ ...prev, [item.id]: false }));
@@ -445,11 +498,13 @@ export default function HomePage() {
 
       if (WIKI_SEARCH[targetCategory]) {
         const searchTopic = WIKI_SEARCH[targetCategory];
-        const wikiCursor = cursorByCategory[targetCategory] || { offset: 0 };
+        const wikiCursor = cursorByCategory[targetCategory] || {
+          offset: Math.floor(Math.random() * (WIKI_RANDOM_START_MAX + 1)),
+        };
         const searchResponse = await fetch(
           `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
             searchTopic,
-          )}&format=json&srlimit=${PAGE_SIZE}&sroffset=${wikiCursor.offset}&origin=*`,
+          )}&format=json&srlimit=${WIKI_PAGE_SIZE}&sroffset=${wikiCursor.offset}&origin=*`,
         );
         const searchJson = await searchResponse.json();
         const titles = shuffleArray(
@@ -466,11 +521,12 @@ export default function HomePage() {
           items: summaries.map((item) => ({
             id: `${targetCategory}-${item.pageid}`,
             title: item.title,
-            detail: item.extract,
+            detail: sanitizeWikiText(item.extract),
             detailFull: null,
             wikiTitle: item.title,
             tag: `Wikipedia - ${CATEGORY_LABELS[targetCategory]}`,
             webUrl: item.content_urls?.desktop?.page || null,
+            imageUrl: item.originalimage?.source || item.thumbnail?.source || null,
           })),
           cursor: { offset: wikiCursor.offset + titles.length },
         };
@@ -712,6 +768,33 @@ export default function HomePage() {
     return () => {
       window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt);
       window.removeEventListener('appinstalled', onAppInstalled);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const onScroll = () => {
+      const currentY = window.scrollY;
+      const delta = currentY - lastScrollYRef.current;
+      const scrollingUp = delta < -6;
+      const scrollingDown = delta > 6;
+      const beyondHeader = currentY > 120;
+
+      if (scrollingUp && beyondHeader) {
+        setShowBottomBar(true);
+      } else if (scrollingDown || !beyondHeader) {
+        setShowBottomBar(false);
+      }
+
+      lastScrollYRef.current = currentY;
+    };
+
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', onScroll);
     };
   }, []);
 
@@ -1054,53 +1137,78 @@ export default function HomePage() {
         <p className="subtitle">A calm feed of facts, paintings, and history that keeps flowing.</p>
 
         <div className="topActions">
-          <div className="tabs" role="tablist" aria-label="Feed categories">
-            {CATEGORIES.map((tab) => {
-              const isActive = tab.key === category;
-              return (
+          <div className="topGroup">
+            <div className="tabs" role="tablist" aria-label="Feed categories">
+              {CATEGORIES.map((tab) => {
+                const isActive = tab.key === category;
+                const Icon = TAB_ICONS[tab.key];
+                return (
+                  <button
+                    key={tab.key}
+                    className={`tab${isActive ? ' tabActive' : ''}`}
+                    onClick={() => setCategory(tab.key)}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    aria-label={tab.label}
+                    title={tab.label}>
+                    {Icon ? <Icon size={CONTROL_ICON_SIZE} aria-hidden="true" /> : tab.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <span className="topDivider" aria-hidden="true" />
+
+            <div className="topControls">
+              {canShowInstallButton ? (
                 <button
-                  key={tab.key}
-                  className={`tab${isActive ? ' tabActive' : ''}`}
-                  onClick={() => setCategory(tab.key)}
+                  className="installButton"
                   type="button"
-                  role="tab"
-                  aria-selected={isActive}>
-                  {tab.label}
+                  onClick={handleInstallClick}
+                  aria-label={installEvent ? 'Install app' : 'Add to Home Screen'}
+                  title={installEvent ? 'Install app' : 'Add to Home Screen'}>
+                  <Home size={CONTROL_ICON_SIZE} aria-hidden="true" />
                 </button>
-              );
-            })}
+              ) : null}
+
+              <button
+                className="installButton"
+                type="button"
+                onClick={cycleVoice}
+                disabled={!availableVoices.length}
+                aria-label={
+                  selectedVoice
+                    ? `Change read aloud voice. Current: ${selectedVoice.name}`
+                    : 'Change read aloud voice'
+                }
+                title={selectedVoice ? `Voice: ${selectedVoice.name}` : 'Change read aloud voice'}>
+                <Volume2 size={CONTROL_ICON_SIZE} aria-hidden="true" />
+              </button>
+
+              <button
+                className="installButton"
+                type="button"
+                onClick={toggleDarkMode}
+                aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={isDarkMode ? 'Light mode' : 'Dark mode'}>
+                {isDarkMode ? (
+                  <Sun size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                ) : (
+                  <Moon size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                )}
+              </button>
+
+              <button
+                className="installButton"
+                type="button"
+                onClick={toggleTextSize}
+                aria-label={isLargeText ? 'Use normal text size' : 'Use larger text size'}
+                title={isLargeText ? 'Text: normal' : 'Text: larger'}>
+                <Type size={CONTROL_ICON_SIZE} aria-hidden="true" />
+              </button>
+            </div>
           </div>
-
-          {canShowInstallButton ? (
-            <button className="installButton" type="button" onClick={handleInstallClick}>
-              {installEvent ? 'Install App' : 'Add to Home Screen'}
-            </button>
-          ) : null}
-
-          <button
-            className="installButton"
-            type="button"
-            onClick={cycleVoice}
-            disabled={!availableVoices.length}
-            aria-label="Change read aloud voice">
-            {selectedVoice ? `Voice: ${selectedVoice.name}` : 'Voice: Default'}
-          </button>
-
-          <button
-            className="installButton"
-            type="button"
-            onClick={toggleDarkMode}
-            aria-label="Toggle dark mode">
-            {isDarkMode ? 'Light mode' : 'Dark mode'}
-          </button>
-
-          <button
-            className="installButton"
-            type="button"
-            onClick={toggleTextSize}
-            aria-label="Toggle larger text">
-            {isLargeText ? 'Text: normal' : 'Text: larger'}
-          </button>
         </div>
       </header>
 
@@ -1119,6 +1227,7 @@ export default function HomePage() {
           const canToggle =
             Boolean(item.detail) &&
             (item.detail.length > SHORT_TEXT_LIMIT || Boolean(item.detailFull));
+          const paragraphText = isExpanded && !isLoadingFull ? getParagraphs(fullText) : null;
 
           return (
             <article
@@ -1162,7 +1271,7 @@ export default function HomePage() {
                         markSeen(item);
                       }}
                       aria-label={`Mark ${item.title} as seen`}>
-                      👀
+                      <Eye size={18} aria-hidden="true" />
                     </button>
                   ) : null}
                   <button
@@ -1173,7 +1282,11 @@ export default function HomePage() {
                       toggleFavorite(item);
                     }}
                     aria-label={isFavorite ? `Unfavorite ${item.title}` : `Save ${item.title}`}>
-                    {isFavorite ? '★' : '☆'}
+                    {isFavorite ? (
+                      <Heart size={18} aria-hidden="true" fill="currentColor" />
+                    ) : (
+                      <Heart size={18} aria-hidden="true" />
+                    )}
                   </button>
                   <button
                     className="favoriteButton"
@@ -1185,7 +1298,11 @@ export default function HomePage() {
                     aria-label={
                       isSpeaking ? `Stop reading ${item.title}` : `Read aloud ${item.title}`
                     }>
-                    {isSpeaking ? '⏹' : '🔊'}
+                    {isSpeaking ? (
+                      <Square size={18} aria-hidden="true" />
+                    ) : (
+                      <Volume2 size={18} aria-hidden="true" />
+                    )}
                   </button>
                   <button
                     className="favoriteButton"
@@ -1195,14 +1312,22 @@ export default function HomePage() {
                       selectArticleText(item);
                     }}
                     aria-label={`Select text for ${item.title}`}>
-                    📑
+                    <Highlighter size={18} aria-hidden="true" />
                   </button>
                 </div>
               </div>
 
               <div ref={(node) => setReadContentRef(item.id, node)}>
                 <h2 className="cardTitle">{item.title}</h2>
-                {displayText ? <p className="cardDetail">{displayText}</p> : null}
+                {paragraphText?.length ? (
+                  paragraphText.map((para, index) => (
+                    <p key={`${item.id}-p-${index}`} className="cardDetail">
+                      {para}
+                    </p>
+                  ))
+                ) : displayText ? (
+                  <p className="cardDetail">{displayText}</p>
+                ) : null}
               </div>
               {canToggle ? (
                 <p className="cardHint">{isExpanded ? 'Tap to collapse' : 'Tap to expand'}</p>
@@ -1304,6 +1429,83 @@ export default function HomePage() {
               onClick={() => setShowInstallGuide(false)}>
               Close
             </button>
+          </div>
+        </div>
+      ) : null}
+
+      {showBottomBar ? (
+        <div className="bottomBar" role="navigation" aria-label="Quick controls">
+          <div className="bottomBarInner">
+            <div className="tabs" role="tablist" aria-label="Feed categories (bottom)">
+              {CATEGORIES.map((tab) => {
+                const isActive = tab.key === category;
+                const Icon = TAB_ICONS[tab.key];
+                return (
+                  <button
+                    key={`bottom-${tab.key}`}
+                    className={`tab${isActive ? ' tabActive' : ''}`}
+                    onClick={() => setCategory(tab.key)}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    aria-label={tab.label}
+                    title={tab.label}>
+                    {Icon ? <Icon size={CONTROL_ICON_SIZE} aria-hidden="true" /> : tab.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <span className="topDivider" aria-hidden="true" />
+
+            <div className="topControls">
+              {canShowInstallButton ? (
+                <button
+                  className="installButton"
+                  type="button"
+                  onClick={handleInstallClick}
+                  aria-label={installEvent ? 'Install app' : 'Add to Home Screen'}
+                  title={installEvent ? 'Install app' : 'Add to Home Screen'}>
+                  <Home size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                </button>
+              ) : null}
+
+              <button
+                className="installButton"
+                type="button"
+                onClick={cycleVoice}
+                disabled={!availableVoices.length}
+                aria-label={
+                  selectedVoice
+                    ? `Change read aloud voice. Current: ${selectedVoice.name}`
+                    : 'Change read aloud voice'
+                }
+                title={selectedVoice ? `Voice: ${selectedVoice.name}` : 'Change read aloud voice'}>
+                <Volume2 size={CONTROL_ICON_SIZE} aria-hidden="true" />
+              </button>
+
+              <button
+                className="installButton"
+                type="button"
+                onClick={toggleDarkMode}
+                aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={isDarkMode ? 'Light mode' : 'Dark mode'}>
+                {isDarkMode ? (
+                  <Sun size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                ) : (
+                  <Moon size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                )}
+              </button>
+
+              <button
+                className="installButton"
+                type="button"
+                onClick={toggleTextSize}
+                aria-label={isLargeText ? 'Use normal text size' : 'Use larger text size'}
+                title={isLargeText ? 'Text: normal' : 'Text: larger'}>
+                <Type size={CONTROL_ICON_SIZE} aria-hidden="true" />
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
