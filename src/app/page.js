@@ -37,10 +37,13 @@ const CATEGORY_LABELS = {
   philosophy: 'Philosophy',
   science: 'Science',
   'computer-science': 'Computer Science',
+  cinema: 'Cinema',
+  'cinema-history': 'Cinema History',
 };
 
 const PAGE_SIZE = 15;
 const PAGE_SIZE_ART = 10;
+const LOAD_MORE_BATCH_MAX = 7;
 const ART_CURATED_BATCH = 12;
 const CONTROL_ICON_SIZE = 16;
 const WIKI_PAGE_SIZE = 20;
@@ -62,18 +65,25 @@ const FEED_SOURCES = [
   'philosophy',
   'science',
   'computer-science',
+  'cinema',
+  'cinema-history',
 ];
 const FEED_SOURCE_BATCH = 3;
 const WIKI_SEARCH = {
   'art-history':
-    'art history OR art movement OR painter OR sculptor OR picasso OR manet OR monet OR vangogh OR "van gogh" OR michelangelo OR "da vinci" OR cezanne OR renoir',
-  'music-history': 'music history OR composer OR symphony OR jazz history OR beethoven OR mozart',
+    'art history OR art movement OR painter OR sculptor OR picasso OR manet OR monet OR vangogh OR "van gogh" OR michelangelo OR "da vinci" OR cezanne OR renoir OR "aristide maillol" OR "henrietta rae" OR "aristide maillol" OR "female painter" OR gentileschi OR "frida kahlo" OR "georgia o keeffe" OR "mary cassatt" OR "berthe morisot" OR "suzanne valadon" OR "tamara de lempicka" OR "leonor fini" OR "alice neel" OR "lynette yiadom"',
+  'music-history':
+    'music history OR composer OR symphony OR jazz history OR beethoven OR mozart OR "florence price" OR "nina simone" OR "billie holiday" OR "ella fitzgerald" OR "clara schumann" OR "fanny mendelssohn" OR "hildegard von bingen" OR "louise farrenc" OR "lili boulanger" OR "ethel smyth" OR "margaret bonds"',
   philosophy:
-    'philosophy OR philosopher OR ethics OR epistemology OR plato OR aristotle OR descartes OR hume OR spinoza OR kant OR nietzsche OR sartre',
+    'philosophy OR philosopher OR ethics OR epistemology OR plato OR aristotle OR descartes OR hume OR spinoza OR kant OR nietzsche OR sartre OR "hannah arendt" OR "simone de beauvoir" OR hypatia OR "elizabeth anscombe" OR "philippa foot" OR "mary midgley" OR "susanne langer" OR "julia kristeva" OR "angela davis" OR "martha nussbaum" OR "judith butler"',
   science:
-    'science OR physics OR biology OR chemistry OR astronomy OR einstein OR newton OR curie OR darwin OR hawking OR feynman',
+    'science OR physics OR biology OR chemistry OR astronomy OR einstein OR newton OR curie OR darwin OR hawking OR feynman OR "marie curie" OR "chandra" OR "vera rubin" OR "cecilia payne" OR "rosalind franklin" OR "jocelyn bell" OR "ada lovelace" OR "hedy lamarr" OR "katherine johnson" OR "dorothy hodgkin" OR "barbara mcclintock"',
   'computer-science':
-    'computer science OR computing OR algorithms OR turing OR hopper OR knuth OR dijkstra OR shannon OR "von neumann" OR linus torvalds',
+    'computer science OR computing OR algorithms OR turing OR hopper OR knuth OR dijkstra OR shannon OR "von neumann" OR linus torvalds OR "ada lovelace" OR "grace hopper" OR "karen spärck jones" OR "frances allen" OR "barbara liskov" OR "jean sammet" OR "radia perlman" OR "adele goldberg" OR "margaret hamilton" OR "mary lou jepsen" OR "fei fei li"',
+  cinema:
+    'cinema OR film OR filmmaker OR director OR screenwriter OR cinematography OR "agnes varda" OR "chloe zhao" OR "kathryn bigelow" OR "greta gerwig" OR "ava duvernay" OR "sofia coppola" OR "satyajit ray" OR "akira kurosawa" OR "hayao miyazaki" OR "francois truffaut"',
+  'cinema-history':
+    'history of cinema OR film history OR silent film OR german expressionism OR french new wave OR italian neorealism OR hollywood golden age OR "new hollywood" OR "parallel cinema" OR "iranian new wave" OR "japanese cinema history" OR "african cinema" OR "latin american cinema"',
 };
 const NATURAL_VOICE_HINTS = [
   'samantha',
@@ -227,6 +237,9 @@ export default function HomePage() {
   const bootstrappedFeedRef = useRef(false);
   const cardRefs = useRef({});
   const readContentRefs = useRef({});
+  const loadMoreSentinelRef = useRef(null);
+  const feedSourceOrderRef = useRef(shuffleArray(FEED_SOURCES));
+  const feedSourceIndexRef = useRef(0);
   const lastScrollYRef = useRef(0);
 
   const items = useMemo(() => itemsByCategory[category] || [], [itemsByCategory, category]);
@@ -497,38 +510,64 @@ export default function HomePage() {
       }
 
       if (WIKI_SEARCH[targetCategory]) {
+        const fetchWikiSummaries = async (topic, offset) => {
+          const searchResponse = await fetch(
+            `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
+              topic,
+            )}&format=json&srlimit=${WIKI_PAGE_SIZE}&sroffset=${offset}&origin=*`,
+          );
+          const searchJson = await searchResponse.json();
+          const titles = shuffleArray(
+            (searchJson?.query?.search || []).map((result) => result.title),
+          );
+
+          const summaryRequests = titles.map((title) =>
+            fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`),
+          );
+          const summaryResponses = await Promise.all(summaryRequests);
+          const summaries = await Promise.all(summaryResponses.map((response) => response.json()));
+
+          return {
+            items: summaries.map((item) => ({
+              id: `${targetCategory}-${item.pageid}`,
+              title: item.title,
+              detail: sanitizeWikiText(item.extract),
+              detailFull: null,
+              wikiTitle: item.title,
+              tag: `Wikipedia - ${CATEGORY_LABELS[targetCategory]}`,
+              webUrl: item.content_urls?.desktop?.page || null,
+              imageUrl: item.originalimage?.source || item.thumbnail?.source || null,
+            })),
+            count: titles.length,
+          };
+        };
+
         const searchTopic = WIKI_SEARCH[targetCategory];
         const wikiCursor = cursorByCategory[targetCategory] || {
           offset: Math.floor(Math.random() * (WIKI_RANDOM_START_MAX + 1)),
         };
-        const searchResponse = await fetch(
-          `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
-            searchTopic,
-          )}&format=json&srlimit=${WIKI_PAGE_SIZE}&sroffset=${wikiCursor.offset}&origin=*`,
-        );
-        const searchJson = await searchResponse.json();
-        const titles = shuffleArray(
-          (searchJson?.query?.search || []).map((result) => result.title),
-        );
+        const initialOffset = Number.isFinite(wikiCursor.offset) ? wikiCursor.offset : 0;
+        let { items, count } = await fetchWikiSummaries(searchTopic, initialOffset);
+        let nextOffset = initialOffset + count;
 
-        const summaryRequests = titles.map((title) =>
-          fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`),
-        );
-        const summaryResponses = await Promise.all(summaryRequests);
-        const summaries = await Promise.all(summaryResponses.map((response) => response.json()));
+        if (!count && initialOffset !== 0) {
+          const retry = await fetchWikiSummaries(searchTopic, 0);
+          items = retry.items;
+          count = retry.count;
+          nextOffset = count;
+        }
+
+        if (!count) {
+          const fallbackTopic = `${CATEGORY_LABELS[targetCategory]} history`;
+          const retryFallback = await fetchWikiSummaries(fallbackTopic, 0);
+          items = retryFallback.items;
+          count = retryFallback.count;
+          nextOffset = count;
+        }
 
         return {
-          items: summaries.map((item) => ({
-            id: `${targetCategory}-${item.pageid}`,
-            title: item.title,
-            detail: sanitizeWikiText(item.extract),
-            detailFull: null,
-            wikiTitle: item.title,
-            tag: `Wikipedia - ${CATEGORY_LABELS[targetCategory]}`,
-            webUrl: item.content_urls?.desktop?.page || null,
-            imageUrl: item.originalimage?.source || item.thumbnail?.source || null,
-          })),
-          cursor: { offset: wikiCursor.offset + titles.length },
+          items,
+          cursor: { offset: nextOffset },
         };
       }
 
@@ -536,6 +575,29 @@ export default function HomePage() {
     },
     [cursorByCategory],
   );
+
+  const getNextFeedSources = useCallback(() => {
+    if (!feedSourceOrderRef.current.length) {
+      feedSourceOrderRef.current = shuffleArray(FEED_SOURCES);
+    }
+
+    const order = feedSourceOrderRef.current;
+    const start = feedSourceIndexRef.current;
+    const batch = [];
+
+    for (let index = 0; index < FEED_SOURCE_BATCH; index += 1) {
+      batch.push(order[(start + index) % order.length]);
+    }
+
+    feedSourceIndexRef.current = (start + FEED_SOURCE_BATCH) % order.length;
+
+    // When a full cycle completes, reshuffle to avoid repeating the same order.
+    if (feedSourceIndexRef.current === 0) {
+      feedSourceOrderRef.current = shuffleArray(FEED_SOURCES);
+    }
+
+    return batch;
+  }, []);
 
   const loadMore = useCallback(
     async (targetCategory) => {
@@ -551,33 +613,60 @@ export default function HomePage() {
         let nextItems = [];
 
         if (targetCategory === 'feed') {
-          const nonArtSources = FEED_SOURCES.filter((source) => source !== 'art');
-          const sourceBatch = [
-            'art',
-            ...shuffleArray(nonArtSources).slice(0, FEED_SOURCE_BATCH - 1),
-          ];
-          const settled = await Promise.allSettled(sourceBatch.map((source) => fetchBatch(source)));
-          const successful = settled
-            .map((result, index) => ({ result, source: sourceBatch[index] }))
-            .filter((entry) => entry.result.status === 'fulfilled');
+          const collectedBatches = [];
+          const cursorUpdates = [];
+          let attempts = 0;
 
-          if (!successful.length) {
-            const firstError = settled.find((entry) => entry.status === 'rejected');
-            throw firstError?.reason || new Error('Could not fetch feed sources.');
-          }
+          // Pull multiple batches until we have variety and a reasonable number of items.
+          while (
+            (collectedBatches.length < 2 || nextItems.length < PAGE_SIZE) &&
+            attempts < FEED_SOURCES.length * 2
+          ) {
+            const sourceBatch = getNextFeedSources();
+            const settled = await Promise.allSettled(
+              sourceBatch.map((source) => fetchBatch(source)),
+            );
+            const successful = settled
+              .map((result, index) => ({ result, source: sourceBatch[index] }))
+              .filter(
+                (entry) =>
+                  entry.result.status === 'fulfilled' &&
+                  Array.isArray(entry.result.value.items) &&
+                  entry.result.value.items.length,
+              );
 
-          setCursorByCategory((prev) => {
-            const updates = { ...prev };
+            if (!successful.length) {
+              const rejected = settled.find((entry) => entry.status === 'rejected');
+              if (rejected) {
+                throw rejected.reason || new Error('Could not fetch feed sources.');
+              }
+            }
+
             successful.forEach((entry) => {
               const batch = entry.result.value;
+              collectedBatches.push(batch.items);
               if (batch.cursor) {
-                updates[entry.source] = batch.cursor;
+                cursorUpdates.push({ source: entry.source, cursor: batch.cursor });
               }
             });
-            return updates;
-          });
 
-          nextItems = shuffleArray(interleave(successful.map((entry) => entry.result.value.items)));
+            nextItems = shuffleArray(interleave(collectedBatches));
+            attempts += 1;
+          }
+
+          if (!collectedBatches.length || !nextItems.length) {
+            throw new Error('Could not fetch feed sources.');
+          }
+
+          if (cursorUpdates.length) {
+            setCursorByCategory((prev) => {
+              const updates = { ...prev };
+              cursorUpdates.forEach((entry) => {
+                updates[entry.source] = entry.cursor;
+              });
+              return updates;
+            });
+          }
         } else {
           const batch = await fetchBatch(targetCategory);
           nextItems = batch.items;
@@ -595,7 +684,10 @@ export default function HomePage() {
           ...seenItemsRef.current.map((item) => item.id),
         ]);
         const unseenItems = nextItems.filter((item) => !previouslySeenIds.has(item.id));
-        const itemsToAdd = unseenItems.length ? unseenItems : nextItems;
+        const itemsToAdd = (unseenItems.length ? unseenItems : nextItems).slice(
+          0,
+          LOAD_MORE_BATCH_MAX,
+        );
 
         setItemsByCategory((prev) => {
           const merged = mergeItems(prev[targetCategory] || [], itemsToAdd);
@@ -618,11 +710,11 @@ export default function HomePage() {
         setLoadingByCategory((prev) => ({ ...prev, [targetCategory]: false }));
       }
     },
-    [fetchBatch],
+    [fetchBatch, getNextFeedSources],
   );
 
   useEffect(() => {
-    if (category !== 'feed' || bootstrappedFeedRef.current || loadingByCategory.feed) {
+    if (category !== 'feed' || bootstrappedFeedRef.current) {
       return;
     }
 
@@ -730,7 +822,6 @@ export default function HomePage() {
       }
     };
   }, []);
-
   useEffect(() => {
     if (typeof window === 'undefined') {
       return undefined;
@@ -810,71 +901,58 @@ export default function HomePage() {
       storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
       storedTextSize = window.localStorage.getItem(TEXT_SIZE_STORAGE_KEY);
     } catch {
-      storedTheme = null;
-      storedTextSize = null;
+      // Ignore storage read failures.
     }
 
-    if (storedTheme === 'dark') {
-      setIsDarkMode(true);
-    }
+    const prefersDark =
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches;
 
-    if (storedTextSize === 'large') {
-      setIsLargeText(true);
-    }
+    setIsDarkMode(storedTheme ? storedTheme === 'dark' : prefersDark);
+    setIsLargeText(storedTextSize === 'large');
+
+    const mediaQuery =
+      typeof window.matchMedia === 'function'
+        ? window.matchMedia('(prefers-color-scheme: dark)')
+        : null;
+
+    const onThemeChange = (event) => {
+      if (!storedTheme) {
+        setIsDarkMode(event.matches);
+      }
+    };
+
+    mediaQuery?.addEventListener('change', onThemeChange);
+
+    return () => {
+      mediaQuery?.removeEventListener('change', onThemeChange);
+    };
   }, []);
 
   useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-
-    try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, isDarkMode ? 'dark' : 'light');
-    } catch {
-      // Ignore storage write failures.
-    }
-  }, [isDarkMode]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-
-    try {
-      window.localStorage.setItem(TEXT_SIZE_STORAGE_KEY, isLargeText ? 'large' : 'default');
-    } catch {
-      // Ignore storage write failures.
-    }
-  }, [isLargeText]);
-
-  useEffect(() => {
     if (typeof window === 'undefined' || !window.speechSynthesis) {
-      return;
+      return undefined;
     }
 
     const restoreVoice = () => {
-      let storedVoiceUri = null;
+      const voices = window.speechSynthesis.getVoices() || [];
+      setAvailableVoices(voices);
 
-      try {
-        storedVoiceUri = window.localStorage.getItem(VOICE_STORAGE_KEY);
-      } catch {
-        storedVoiceUri = null;
-      }
-
-      const voices = window.speechSynthesis.getVoices();
-      const preferredVoice = pickPreferredVoice(voices, storedVoiceUri);
-
-      if (!preferredVoice) {
+      if (!voices.length) {
         return;
       }
 
-      const englishVoices = voices.filter((voice) => voice.lang?.toLowerCase().startsWith('en'));
-      const sortedVoicePool = (englishVoices.length ? englishVoices : voices)
-        .slice()
-        .sort((left, right) => left.name.localeCompare(right.name));
+      let storedVoice = null;
+      try {
+        storedVoice = window.localStorage.getItem(VOICE_STORAGE_KEY);
+      } catch {
+        // Ignore storage read failures.
+      }
 
-      setAvailableVoices(sortedVoicePool);
-      setSelectedVoiceUri(preferredVoice.voiceURI);
+      const preferred = voices.find((voice) => voice.voiceURI === storedVoice) || voices[0];
+      if (!selectedVoiceUri) {
+        setSelectedVoiceUri(preferred?.voiceURI || null);
+      }
     };
 
     restoreVoice();
@@ -883,7 +961,7 @@ export default function HomePage() {
     return () => {
       window.speechSynthesis.removeEventListener('voiceschanged', restoreVoice);
     };
-  }, []);
+  }, [selectedVoiceUri]);
 
   const canShowInstallButton = !isStandalone && (Boolean(installEvent) || isIos);
   const hasHiddenOnlyFeed =
@@ -1128,6 +1206,41 @@ export default function HomePage() {
       observer.disconnect();
     };
   }, [category, filteredItems, trackSeenByViewing]);
+
+  useEffect(() => {
+    if (category !== 'feed' || typeof window === 'undefined' || !window.IntersectionObserver) {
+      return;
+    }
+
+    const sentinel = loadMoreSentinelRef.current;
+    if (!sentinel) {
+      return;
+    }
+
+    const observer = new window.IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) {
+          return;
+        }
+
+        if (loadingByCategory.feed || errorByCategory.feed) {
+          return;
+        }
+
+        loadMore('feed');
+      },
+      {
+        rootMargin: '500px 0px',
+        threshold: 0.01,
+      },
+    );
+
+    observer.observe(sentinel);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [category, errorByCategory.feed, loadMore, loadingByCategory.feed]);
 
   return (
     <main className={`page${isDarkMode ? ' pageDark' : ''}${isLargeText ? ' pageLargeText' : ''}`}>
@@ -1395,11 +1508,7 @@ export default function HomePage() {
             </button>
           </div>
         ) : null}
-        {category === 'feed' && !loadingByCategory[category] && !errorByCategory[category] ? (
-          <button className="retryButton" type="button" onClick={() => loadMore('feed')}>
-            Load more
-          </button>
-        ) : null}
+        {category === 'feed' ? <div ref={loadMoreSentinelRef} aria-hidden="true" /> : null}
       </footer>
 
       {activeImage ? (
