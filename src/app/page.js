@@ -5,9 +5,10 @@ import {
   Eye,
   Heart,
   Highlighter,
-  Home,
   Infinity as InfinityIcon,
   Moon,
+  Play,
+  Speech,
   Square,
   Sun,
   Type,
@@ -201,6 +202,15 @@ function pickPreferredVoice(voices, preferredVoiceUri) {
   return naturalMatch || voicePool[0] || voices[0] || null;
 }
 
+function getVoiceColor(voiceIndex, totalVoices) {
+  if (voiceIndex < 0 || totalVoices <= 0) {
+    return 'currentColor';
+  }
+
+  const hue = Math.round((voiceIndex / Math.max(1, totalVoices)) * 360);
+  return `hsl(${hue} 78% 56%)`;
+}
+
 export default function HomePage() {
   const [category, setCategory] = useState(CATEGORIES[0].key);
   const [itemsByCategory, setItemsByCategory] = useState({});
@@ -214,16 +224,13 @@ export default function HomePage() {
   const [seenItems, setSeenItems] = useState([]);
   const [favoriteIds, setFavoriteIds] = useState(new Set());
   const [favoriteItems, setFavoriteItems] = useState([]);
-  const [installEvent, setInstallEvent] = useState(null);
-  const [showInstallGuide, setShowInstallGuide] = useState(false);
-  const [isIos, setIsIos] = useState(false);
-  const [isStandalone, setIsStandalone] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [isLargeText, setIsLargeText] = useState(false);
   const [speakingItemId, setSpeakingItemId] = useState(null);
   const [availableVoices, setAvailableVoices] = useState([]);
   const [selectedVoiceUri, setSelectedVoiceUri] = useState(null);
   const [showBottomBar, setShowBottomBar] = useState(false);
+  const [isAmbientPlaying, setIsAmbientPlaying] = useState(false);
 
   const inFlightRef = useRef({});
   const seenIdsRef = useRef(new Set());
@@ -233,6 +240,7 @@ export default function HomePage() {
   const viewedIdsRef = useRef(new Set());
   const speakingItemIdRef = useRef(null);
   const utteranceRef = useRef(null);
+  const ambientAudioRef = useRef(null);
   const saveTimeoutRef = useRef(null);
   const bootstrappedFeedRef = useRef(false);
   const cardRefs = useRef({});
@@ -827,39 +835,13 @@ export default function HomePage() {
       return undefined;
     }
 
-    const userAgent = window.navigator.userAgent.toLowerCase();
-    const iosDevice = /iphone|ipad|ipod/.test(userAgent);
-    const standalone =
-      window.matchMedia('(display-mode: standalone)').matches ||
-      window.navigator.standalone === true;
-
-    setIsIos(iosDevice);
-    setIsStandalone(standalone);
-
-    const onBeforeInstallPrompt = (event) => {
-      event.preventDefault();
-      setInstallEvent(event);
-    };
-
-    const onAppInstalled = () => {
-      setInstallEvent(null);
-      setShowInstallGuide(false);
-      setIsStandalone(true);
-    };
-
-    window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt);
-    window.addEventListener('appinstalled', onAppInstalled);
-
     if ('serviceWorker' in window.navigator) {
       window.navigator.serviceWorker.register('/sw.js').catch(() => {
         // Ignore SW registration failures.
       });
     }
 
-    return () => {
-      window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt);
-      window.removeEventListener('appinstalled', onAppInstalled);
-    };
+    return undefined;
   }, []);
 
   useEffect(() => {
@@ -963,13 +945,20 @@ export default function HomePage() {
     };
   }, [selectedVoiceUri]);
 
-  const canShowInstallButton = !isStandalone && (Boolean(installEvent) || isIos);
   const hasHiddenOnlyFeed =
     category === 'feed' && (itemsByCategory.feed?.length || 0) > 0 && filteredItems.length === 0;
 
   const selectedVoice = useMemo(
     () => availableVoices.find((voice) => voice.voiceURI === selectedVoiceUri) || null,
     [availableVoices, selectedVoiceUri],
+  );
+  const selectedVoiceIndex = useMemo(
+    () => availableVoices.findIndex((voice) => voice.voiceURI === selectedVoiceUri),
+    [availableVoices, selectedVoiceUri],
+  );
+  const voiceIconColor = useMemo(
+    () => getVoiceColor(selectedVoiceIndex, availableVoices.length),
+    [availableVoices.length, selectedVoiceIndex],
   );
 
   const stopReadAloud = useCallback(() => {
@@ -1068,6 +1057,52 @@ export default function HomePage() {
     }
   }, [availableVoices, selectedVoiceUri, stopReadAloud]);
 
+  const toggleAmbientSound = useCallback(async () => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    if (!ambientAudioRef.current) {
+      const audio = new Audio('/assets/sound.mp3');
+      audio.loop = true;
+      audio.preload = 'auto';
+      audio.addEventListener('ended', () => {
+        audio.currentTime = 0;
+        audio
+          .play()
+          .then(() => {
+            setIsAmbientPlaying(true);
+          })
+          .catch(() => {
+            setIsAmbientPlaying(false);
+          });
+      });
+      audio.addEventListener('play', () => {
+        setIsAmbientPlaying(true);
+      });
+      audio.addEventListener('pause', () => {
+        setIsAmbientPlaying(false);
+      });
+      ambientAudioRef.current = audio;
+    }
+
+    const audio = ambientAudioRef.current;
+    if (!audio) {
+      return;
+    }
+
+    if (!audio.paused) {
+      audio.pause();
+      return;
+    }
+
+    try {
+      await audio.play();
+    } catch {
+      setIsAmbientPlaying(false);
+    }
+  }, []);
+
   const toggleDarkMode = useCallback(() => {
     setIsDarkMode((prev) => !prev);
   }, []);
@@ -1075,23 +1110,6 @@ export default function HomePage() {
   const toggleTextSize = useCallback(() => {
     setIsLargeText((prev) => !prev);
   }, []);
-
-  const handleInstallClick = useCallback(async () => {
-    if (installEvent) {
-      installEvent.prompt();
-      try {
-        await installEvent.userChoice;
-      } catch {
-        // Ignore prompt cancellation.
-      }
-      setInstallEvent(null);
-      return;
-    }
-
-    if (isIos) {
-      setShowInstallGuide(true);
-    }
-  }, [installEvent, isIos]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -1106,6 +1124,16 @@ export default function HomePage() {
   }, [cursorByCategory]);
 
   useEffect(() => () => stopReadAloud(), [stopReadAloud]);
+
+  useEffect(
+    () => () => {
+      if (ambientAudioRef.current) {
+        ambientAudioRef.current.pause();
+        ambientAudioRef.current.currentTime = 0;
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (speakingItemId && !filteredItems.some((item) => item.id === speakingItemId)) {
@@ -1274,17 +1302,6 @@ export default function HomePage() {
             <span className="topDivider" aria-hidden="true" />
 
             <div className="topControls">
-              {canShowInstallButton ? (
-                <button
-                  className="installButton"
-                  type="button"
-                  onClick={handleInstallClick}
-                  aria-label={installEvent ? 'Install app' : 'Add to Home Screen'}
-                  title={installEvent ? 'Install app' : 'Add to Home Screen'}>
-                  <Home size={CONTROL_ICON_SIZE} aria-hidden="true" />
-                </button>
-              ) : null}
-
               <button
                 className="installButton"
                 type="button"
@@ -1296,7 +1313,24 @@ export default function HomePage() {
                     : 'Change read aloud voice'
                 }
                 title={selectedVoice ? `Voice: ${selectedVoice.name}` : 'Change read aloud voice'}>
-                <Volume2 size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                <Speech
+                  size={CONTROL_ICON_SIZE}
+                  aria-hidden="true"
+                  style={{ color: voiceIconColor }}
+                />
+              </button>
+
+              <button
+                className="installButton"
+                type="button"
+                onClick={toggleAmbientSound}
+                aria-label={isAmbientPlaying ? 'Pause ambient sound' : 'Play ambient sound'}
+                title={isAmbientPlaying ? 'Pause ambient sound' : 'Play ambient sound'}>
+                {isAmbientPlaying ? (
+                  <Square size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                ) : (
+                  <Play size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                )}
               </button>
 
               <button
@@ -1517,31 +1551,6 @@ export default function HomePage() {
         </div>
       ) : null}
 
-      {showInstallGuide ? (
-        <div
-          className="dialogBackdrop"
-          role="presentation"
-          onClick={() => setShowInstallGuide(false)}>
-          <div
-            className="dialogCard"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Install instructions"
-            onClick={(event) => event.stopPropagation()}>
-            <h3>Install on iPhone</h3>
-            <p>1. Tap the Share button in Safari.</p>
-            <p>2. Choose Add to Home Screen.</p>
-            <p>3. Tap Add.</p>
-            <button
-              type="button"
-              className="retryButton"
-              onClick={() => setShowInstallGuide(false)}>
-              Close
-            </button>
-          </div>
-        </div>
-      ) : null}
-
       {showBottomBar ? (
         <div className="bottomBar" role="navigation" aria-label="Quick controls">
           <div className="bottomBarInner">
@@ -1568,17 +1577,6 @@ export default function HomePage() {
             <span className="topDivider" aria-hidden="true" />
 
             <div className="topControls">
-              {canShowInstallButton ? (
-                <button
-                  className="installButton"
-                  type="button"
-                  onClick={handleInstallClick}
-                  aria-label={installEvent ? 'Install app' : 'Add to Home Screen'}
-                  title={installEvent ? 'Install app' : 'Add to Home Screen'}>
-                  <Home size={CONTROL_ICON_SIZE} aria-hidden="true" />
-                </button>
-              ) : null}
-
               <button
                 className="installButton"
                 type="button"
@@ -1590,7 +1588,24 @@ export default function HomePage() {
                     : 'Change read aloud voice'
                 }
                 title={selectedVoice ? `Voice: ${selectedVoice.name}` : 'Change read aloud voice'}>
-                <Volume2 size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                <Speech
+                  size={CONTROL_ICON_SIZE}
+                  aria-hidden="true"
+                  style={{ color: voiceIconColor }}
+                />
+              </button>
+
+              <button
+                className="installButton"
+                type="button"
+                onClick={toggleAmbientSound}
+                aria-label={isAmbientPlaying ? 'Pause ambient sound' : 'Play ambient sound'}
+                title={isAmbientPlaying ? 'Pause ambient sound' : 'Play ambient sound'}>
+                {isAmbientPlaying ? (
+                  <Square size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                ) : (
+                  <Play size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                )}
               </button>
 
               <button
