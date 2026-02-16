@@ -1,0 +1,407 @@
+:root {
+  --paper: #f6f1e8;
+  --ink: #2a2016;
+  --muted: #6b5b4c;
+  --line: #e0d4c5;
+  --panel: #ffffff;
+  --accent: #b3643f;
+  --chip: #efe7dc;
+  --bg-start: #fff7ea;
+  --bg-mid: var(--paper);
+  --bg-end: #efe7dc;
+  --page-start: rgba(255, 255, 255, 0.7);
+  --page-end: rgba(246, 241, 232, 0.9);
+  --detail: #514235;
+  --install-border: #d8a58d;
+  --install-bg: #fef1e8;
+  --install-ink: #7d3f21;
+  --seen-border: #d8cbb9;
+  --seen-bg: #f8f2e9;
+  --seen-ink: #5f4f40;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: 'Avenir Next', 'Segoe UI', 'Helvetica Neue', sans-serif;
+  background: radial-gradient(circle at 10% 10%, var(--bg-start) 0%, var(--bg-mid) 55%, var(--bg-end) 100%);
+  color: var(--ink);
+}
+
+button,
+a {
+  font: inherit;
+}
+
+.page {
+  max-width: 760px;
+  margin: 0 auto;
+  min-height: 100vh;
+  background: linear-gradient(180deg, var(--page-start), var(--page-end));
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+
+.pageDark {
+  --paper: #1a1a1c;
+  --ink: #f5f6f8;
+  --muted: #c9cbd1;
+  --line: #3a3b40;
+  --panel: #232428;
+  --accent: #f0b08a;
+  --chip: #2a2b30;
+  --bg-start: #2b2c31;
+  --bg-mid: #1e1f23;
+  --bg-end: #15161a;
+  --page-start: rgba(43, 44, 49, 0.84);
+  --page-end: rgba(21, 22, 26, 0.96);
+  --detail: #e3e5eb;
+  --install-border: #8b6a59;
+  --install-bg: #3a2b23;
+  --install-ink: #ffe0cf;
+  --seen-border: #5a5c63;
+  --seen-bg: #32343a;
+  --seen-ink: #e6e8ed;
+}
+
+.pageLargeText {
+  font-size: 17px;
+}
+
+.pageLargeText .title {
+  font-size: 34px;
+}
+
+.pageLargeText .subtitle {
+  font-size: 16px;
+}
+
+.pageLargeText .tab,
+.pageLargeText .installButton,
+.pageLargeText .favoriteButton,
+.pageLargeText .seenButton,
+.pageLargeText .retryButton,
+.pageLargeText .cardHint,
+.pageLargeText .cardLink,
+.pageLargeText .cardTag {
+  font-size: 13px;
+}
+
+.pageLargeText .cardTitle {
+  font-size: 24px;
+}
+
+.pageLargeText .cardDetail {
+  font-size: 17px;
+}
+
+.pageLargeText .stateTitle {
+  font-size: 17px;
+}
+
+.pageLargeText .stateDetail {
+  font-size: 15px;
+}
+
+.headerWrap {
+  padding: 24px 20px 16px;
+}
+
+.kicker {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.title {
+  margin: 8px 0 0;
+  font-size: 30px;
+  line-height: 1.1;
+}
+
+.subtitle {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.topActions {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tab {
+  border: 1px solid var(--line);
+  background: var(--chip);
+  color: var(--muted);
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+.tabActive {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.installButton {
+  border: 1px solid var(--install-border);
+  background: var(--install-bg);
+  color: var(--install-ink);
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.feed {
+  padding-bottom: 12px;
+}
+
+.card {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 18px 20px;
+  outline: none;
+}
+
+.card[role='button'] {
+  cursor: pointer;
+}
+
+.card[role='button']:focus-visible {
+  box-shadow: inset 0 0 0 2px rgba(179, 100, 63, 0.35);
+}
+
+.imageButton {
+  display: block;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  margin: 0 0 12px;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.cardImage {
+  width: 100%;
+  max-height: 300px;
+  object-fit: cover;
+  border-radius: 14px;
+  display: block;
+  background: var(--chip);
+}
+
+.cardMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cardActions {
+  display: flex;
+  gap: 8px;
+}
+
+.cardTag {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.favoriteButton {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.seenButton {
+  border: 1px solid var(--seen-border);
+  background: var(--seen-bg);
+  color: var(--seen-ink);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.cardTitle {
+  margin: 8px 0 0;
+  font-size: 21px;
+  color: var(--ink);
+}
+
+.cardDetail {
+  margin: 8px 0 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--detail);
+}
+
+.cardHint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+}
+
+.cardLink {
+  display: inline-block;
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.footer {
+  padding: 0 20px 16px;
+}
+
+.stateCard {
+  background: var(--chip);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px;
+  margin-top: 12px;
+}
+
+.stateTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.stateDetail {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.retryButton {
+  margin-top: 12px;
+  border: 0;
+  background: var(--ink);
+  color: var(--paper);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 1000;
+}
+
+.modalImage {
+  max-width: min(900px, 96vw);
+  max-height: 96vh;
+  object-fit: contain;
+}
+
+.dialogBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  background: rgba(42, 32, 22, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.dialogCard {
+  width: min(420px, 100%);
+  background: #fffdf9;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 18px;
+}
+
+.dialogCard h3 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.dialogCard p {
+  margin: 10px 0 0;
+  color: #514235;
+  line-height: 1.45;
+}
+
+@media (max-width: 640px) {
+  .page {
+    border: 0;
+  }
+
+  .title {
+    font-size: 28px;
+  }
+
+  .card {
+    padding-inline: 16px;
+  }
+
+  .headerWrap,
+  .footer {
+    padding-inline: 16px;
+  }
+}
