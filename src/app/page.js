@@ -15,6 +15,7 @@ import {
   Type,
   Volume2,
 } from 'lucide-react';
+import Lenis from 'lenis';
 import curatedArtTerms from '../data/art_highlights.json';
 
 const CATEGORIES = [
@@ -71,8 +72,12 @@ const MINDFUL_SCROLL_SPEED_MEDIUM = 1200;
 const MINDFUL_SCROLL_SPEED_FAST = 1800;
 const MINDFUL_SCORE_PENALTY_MEDIUM = -1;
 const MINDFUL_SCORE_PENALTY_FAST = -2;
+const MINDFUL_SCROLL_PENALTY_COOLDOWN_MS = 420;
 const MINDFUL_SCORE_PASSIVE_INTERVAL = 15000;
 const MINDFUL_SCORE_PASSIVE_GAIN = 1;
+const BOTTOM_BAR_SHOW_SCROLL_PX = 28;
+const BOTTOM_BAR_HIDE_SCROLL_PX = 40;
+const BOTTOM_BAR_SCROLL_DELTA_MIN = 2;
 const ART_QUERY = 'painting';
 const FEED_SOURCES = [
   'art',
@@ -342,6 +347,9 @@ export default function HomePage() {
   const feedLoadCountRef = useRef(0);
   const lastScrollYRef = useRef(0);
   const lastScrollAtRef = useRef(0);
+  const lastPenaltyAtRef = useRef(0);
+  const upScrollAccumRef = useRef(0);
+  const downScrollAccumRef = useRef(0);
   const mindfulScoreRef = useRef(0);
 
   const items = useMemo(() => itemsByCategory[category] || [], [itemsByCategory, category]);
@@ -1197,6 +1205,43 @@ export default function HomePage() {
       return;
     }
 
+    const prefersReducedMotion =
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    if (prefersReducedMotion) {
+      return;
+    }
+
+    const lenis = new Lenis({
+      smoothWheel: true,
+      lerp: 0.12,
+      wheelMultiplier: 0.88,
+      touchMultiplier: 1,
+      syncTouch: false,
+    });
+
+    let frameId = null;
+    const raf = (time) => {
+      lenis.raf(time);
+      frameId = window.requestAnimationFrame(raf);
+    };
+
+    frameId = window.requestAnimationFrame(raf);
+
+    return () => {
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
+      lenis.destroy();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
     lastScrollAtRef.current = Date.now();
 
     const onScroll = () => {
@@ -1204,23 +1249,51 @@ export default function HomePage() {
       const elapsed = Math.max(16, now - lastScrollAtRef.current);
       const currentY = window.scrollY;
       const delta = currentY - lastScrollYRef.current;
-      const scrollingUp = delta < -6;
-      const scrollingDown = delta > 6;
       const beyondHeader = currentY > 120;
       const speed = Math.abs(delta) * (1000 / elapsed);
 
       if (category === 'feed') {
-        if (speed >= MINDFUL_SCROLL_SPEED_FAST) {
-          adjustMindfulScore(MINDFUL_SCORE_PENALTY_FAST);
-        } else if (speed >= MINDFUL_SCROLL_SPEED_MEDIUM) {
-          adjustMindfulScore(MINDFUL_SCORE_PENALTY_MEDIUM);
+        const sinceLastPenalty = now - lastPenaltyAtRef.current;
+        if (sinceLastPenalty >= MINDFUL_SCROLL_PENALTY_COOLDOWN_MS) {
+          if (speed >= MINDFUL_SCROLL_SPEED_FAST) {
+            adjustMindfulScore(MINDFUL_SCORE_PENALTY_FAST);
+            lastPenaltyAtRef.current = now;
+          } else if (speed >= MINDFUL_SCROLL_SPEED_MEDIUM) {
+            adjustMindfulScore(MINDFUL_SCORE_PENALTY_MEDIUM);
+            lastPenaltyAtRef.current = now;
+          }
         }
       }
 
-      if (scrollingUp && beyondHeader) {
-        setShowBottomBar(true);
-      } else if (scrollingDown || !beyondHeader) {
+      if (!beyondHeader) {
+        upScrollAccumRef.current = 0;
+        downScrollAccumRef.current = 0;
         setShowBottomBar(false);
+      } else {
+        if (delta <= -BOTTOM_BAR_SCROLL_DELTA_MIN) {
+          upScrollAccumRef.current += Math.abs(delta);
+          downScrollAccumRef.current = 0;
+        } else if (delta >= BOTTOM_BAR_SCROLL_DELTA_MIN) {
+          downScrollAccumRef.current += delta;
+          upScrollAccumRef.current = 0;
+        }
+
+        setShowBottomBar((prev) => {
+          let next = prev;
+
+          if (!prev && upScrollAccumRef.current >= BOTTOM_BAR_SHOW_SCROLL_PX) {
+            next = true;
+          } else if (prev && downScrollAccumRef.current >= BOTTOM_BAR_HIDE_SCROLL_PX) {
+            next = false;
+          }
+
+          if (next !== prev) {
+            upScrollAccumRef.current = 0;
+            downScrollAccumRef.current = 0;
+          }
+
+          return next;
+        });
       }
 
       lastScrollAtRef.current = now;
