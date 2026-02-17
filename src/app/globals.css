@@ -602,6 +602,84 @@ body {
         line-height: 1.45;
 }
 
+.breathOverlay {
+        position: fixed;
+        inset: 0;
+        z-index: 1150;
+        background: color-mix(in srgb, var(--ink) 52%, transparent);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+}
+
+.breathCard {
+        width: 100vw;
+        height: 100dvh;
+        background: var(--panel);
+        color: var(--ink);
+        border-radius: 0;
+        padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
+        text-align: center;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+}
+
+.breathCard h3 {
+        margin: 0;
+        font-size: 20px;
+}
+
+.breathCard p {
+        margin: 10px 0 0;
+        color: var(--muted);
+        line-height: 1.45;
+}
+
+.breathCircleWrap {
+        margin: 18px auto 0;
+        width: 170px;
+        height: 170px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+}
+
+.breathCircle {
+        width: 96px;
+        height: 96px;
+        border-radius: 999px;
+        border: 1px solid var(--accent);
+        background: color-mix(in srgb, var(--accent) 18%, var(--chip));
+        animation: breathPulse 10s ease-in-out infinite;
+}
+
+.breathHint {
+        margin-top: 10px;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--detail);
+        font-weight: 700;
+}
+
+@keyframes breathPulse {
+        0% {
+                transform: scale(0.22);
+        }
+
+        50% {
+                transform: scale(1.38);
+        }
+
+
+        100% {
+                transform: scale(0.22);
+        }
+}
+
 .bottomBar {
         position: fixed;
         inset-inline: 0;

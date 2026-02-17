@@ -75,6 +75,7 @@ const AUTO_SCROLL_STORAGE_KEY = 'smortscroll:auto-scroll';
 const AUTO_SCROLL_STEP_PX = 100;
 const AUTO_SCROLL_STEP_MS = 5500;
 const FALLBACK_IMAGE_URL = '/icons/icon-512.png';
+const BREATH_BREAK_INTERVAL_MS = 5 * 60 * 1000;
 const MINDFUL_SCORE_MIN = 0;
 const MINDFUL_SCORE_MAX = 9999;
 const MINDFUL_SCROLL_SPEED_MEDIUM = 1200;
@@ -401,6 +402,8 @@ export default function HomePage() {
   const [openMenuSlot, setOpenMenuSlot] = useState(null);
   const [showReadingGuide, setShowReadingGuide] = useState(false);
   const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(false);
+  const [showBreathOverlay, setShowBreathOverlay] = useState(false);
+  const [isBreathSoundReady, setIsBreathSoundReady] = useState(false);
 
   const inFlightRef = useRef({});
   const seenIdsRef = useRef(new Set());
@@ -424,7 +427,11 @@ export default function HomePage() {
   const upScrollAccumRef = useRef(0);
   const downScrollAccumRef = useRef(0);
   const mindfulScoreRef = useRef(0);
+  const activeVisibleMsRef = useRef(0);
+  const activeVisibleTickRef = useRef(0);
   const wakeLockRef = useRef(null);
+  const breathAudioRef = useRef(null);
+  const breathCircleRef = useRef(null);
   const topMenuRef = useRef(null);
   const bottomMenuRef = useRef(null);
 
@@ -1603,6 +1610,75 @@ export default function HomePage() {
     setIsAutoScrollEnabled((prev) => !prev);
   }, []);
 
+  const dismissBreathOverlay = useCallback(() => {
+    setShowBreathOverlay(false);
+    setIsBreathSoundReady(false);
+    activeVisibleTickRef.current = Date.now();
+  }, []);
+
+  const stopBreathSound = useCallback(() => {
+    const audio = breathAudioRef.current;
+    if (!audio) {
+      return;
+    }
+
+    audio.pause();
+    audio.currentTime = 0;
+    setIsBreathSoundReady(false);
+  }, []);
+
+  const startBreathSound = useCallback(async () => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+
+    if (breathAudioRef.current) {
+      const existingAudio = breathAudioRef.current;
+      existingAudio.currentTime = 0;
+
+      try {
+        await existingAudio.play();
+        setIsBreathSoundReady(true);
+        return true;
+      } catch {
+        setIsBreathSoundReady(false);
+        return false;
+      }
+    }
+
+    const audio = new Audio('/assets/sound2.mp3');
+    audio.loop = true;
+    audio.preload = 'auto';
+    audio.volume = 1;
+    audio.addEventListener('play', () => {
+      setIsBreathSoundReady(true);
+    });
+    audio.addEventListener('pause', () => {
+      setIsBreathSoundReady(false);
+    });
+    breathAudioRef.current = audio;
+
+    try {
+      audio.currentTime = 0;
+      await audio.play();
+      setIsBreathSoundReady(true);
+      return true;
+    } catch {
+      setIsBreathSoundReady(false);
+      return false;
+    }
+  }, []);
+
+  const openBreathOverlay = useCallback(() => {
+    setShowBreathOverlay(true);
+    setOpenMenuSlot(null);
+    void startBreathSound();
+  }, [startBreathSound]);
+
+  const enableBreathSound = useCallback(() => {
+    void startBreathSound();
+  }, [startBreathSound]);
+
   useEffect(() => {
     if (typeof window === 'undefined' || !openMenuSlot) {
       return;
@@ -1634,6 +1710,78 @@ export default function HomePage() {
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [openMenuSlot]);
+
+  useEffect(() => {
+    if (showBreathOverlay) {
+      void startBreathSound();
+      return;
+    }
+
+    setIsBreathSoundReady(false);
+    stopBreathSound();
+  }, [showBreathOverlay, startBreathSound, stopBreathSound]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !showBreathOverlay || isBreathSoundReady) {
+      return;
+    }
+
+    let detached = false;
+
+    const detach = () => {
+      if (detached) {
+        return;
+      }
+
+      detached = true;
+      window.removeEventListener('touchstart', onUnlockGesture);
+      window.removeEventListener('pointerdown', onUnlockGesture);
+      window.removeEventListener('click', onUnlockGesture);
+    };
+
+    const onUnlockGesture = () => {
+      void startBreathSound().then((started) => {
+        if (started) {
+          detach();
+        }
+      });
+    };
+
+    window.addEventListener('touchstart', onUnlockGesture, { passive: true });
+    window.addEventListener('pointerdown', onUnlockGesture);
+    window.addEventListener('click', onUnlockGesture);
+
+    return detach;
+  }, [showBreathOverlay, isBreathSoundReady, startBreathSound]);
+
+  useEffect(() => {
+    if (!showBreathOverlay) {
+      return;
+    }
+
+    const circle = breathCircleRef.current;
+    if (!circle) {
+      return;
+    }
+
+    const syncAudioToCycle = () => {
+      const audio = breathAudioRef.current;
+      if (!audio || audio.paused) {
+        return;
+      }
+
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // Ignore time reset failures.
+      }
+    };
+
+    circle.addEventListener('animationiteration', syncAudioToCycle);
+    return () => {
+      circle.removeEventListener('animationiteration', syncAudioToCycle);
+    };
+  }, [showBreathOverlay]);
 
   useEffect(() => {
     if (typeof document === 'undefined') {
@@ -1762,6 +1910,44 @@ export default function HomePage() {
       return;
     }
 
+    activeVisibleTickRef.current = Date.now();
+
+    const tick = () => {
+      const now = Date.now();
+      const previous = activeVisibleTickRef.current || now;
+      activeVisibleTickRef.current = now;
+
+      if (document.visibilityState !== 'visible' || showBreathOverlay) {
+        return;
+      }
+
+      const elapsed = Math.min(5000, Math.max(0, now - previous));
+      activeVisibleMsRef.current += elapsed;
+
+      if (activeVisibleMsRef.current >= BREATH_BREAK_INTERVAL_MS) {
+        activeVisibleMsRef.current = 0;
+        setShowBreathOverlay(true);
+      }
+    };
+
+    const intervalId = window.setInterval(tick, 1000);
+    const handleVisibility = () => {
+      activeVisibleTickRef.current = Date.now();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [showBreathOverlay]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
     try {
       const storedValue = window.localStorage.getItem(AUTO_SCROLL_STORAGE_KEY);
       setIsAutoScrollEnabled(storedValue === '1');
@@ -1824,6 +2010,13 @@ export default function HomePage() {
   }, [isAutoScrollEnabled]);
 
   useEffect(() => () => stopReadAloud(), [stopReadAloud]);
+
+  useEffect(
+    () => () => {
+      void stopBreathSound();
+    },
+    [stopBreathSound],
+  );
 
   useEffect(
     () => () => {
@@ -2098,10 +2291,12 @@ export default function HomePage() {
                         <Timer size={14} aria-hidden="true" />
                       </button>
                       <button
-                        className="menuIconButton"
+                        className={`menuIconButton${showBreathOverlay ? ' menuIconButtonActive' : ''}`}
                         type="button"
-                        disabled
-                        aria-label="Alerts coming soon">
+                        onClick={openBreathOverlay}
+                        aria-pressed={showBreathOverlay}
+                        aria-label="Start breathing exercise"
+                        title="Start breathing exercise">
                         <Bell size={14} aria-hidden="true" />
                       </button>
                     </div>
@@ -2363,6 +2558,31 @@ export default function HomePage() {
         </div>
       ) : null}
 
+      {showBreathOverlay ? (
+        <div
+          className="breathOverlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="breath-title">
+          <div className="breathCard">
+            <h3 id="breath-title">Mindful breathing break</h3>
+            <p>Pause for a moment and follow the circle.</p>
+            <div className="breathCircleWrap" aria-hidden="true">
+              <div className="breathCircle" ref={breathCircleRef} />
+            </div>
+            <p className="breathHint">Inhale 5s · exhale 5s</p>
+            {!isBreathSoundReady ? (
+              <button className="retryButton" type="button" onClick={enableBreathSound}>
+                Tap to enable sound
+              </button>
+            ) : null}
+            <button className="retryButton" type="button" onClick={dismissBreathOverlay}>
+              Close
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {showReadingGuide ? <div className="readingGuide" aria-hidden="true" /> : null}
 
       {showBottomBar ? (
@@ -2457,10 +2677,12 @@ export default function HomePage() {
                         <Timer size={14} aria-hidden="true" />
                       </button>
                       <button
-                        className="menuIconButton"
+                        className={`menuIconButton${showBreathOverlay ? ' menuIconButtonActive' : ''}`}
                         type="button"
-                        disabled
-                        aria-label="Alerts coming soon">
+                        onClick={openBreathOverlay}
+                        aria-pressed={showBreathOverlay}
+                        aria-label="Start breathing exercise"
+                        title="Start breathing exercise">
                         <Bell size={14} aria-hidden="true" />
                       </button>
                     </div>
