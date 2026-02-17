@@ -2,13 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Bell,
   BookText,
+  ChevronsDown,
   ChevronDown,
   Eye,
   Heart,
   Highlighter,
   Infinity as InfinityIcon,
+  Info,
+  Leaf,
   Minus,
   Moon,
   Play,
@@ -16,7 +18,6 @@ import {
   SlidersHorizontal,
   Square,
   Sun,
-  Timer,
   Type,
   Volume2,
 } from 'lucide-react';
@@ -82,9 +83,12 @@ const MINDFUL_SCROLL_SPEED_MEDIUM = 1200;
 const MINDFUL_SCROLL_SPEED_FAST = 1800;
 const MINDFUL_SCORE_PENALTY_MEDIUM = -1;
 const MINDFUL_SCORE_PENALTY_FAST = -2;
+const MINDFUL_SCORE_PENALTY_MEDIUM_DOWN = -2;
+const MINDFUL_SCORE_PENALTY_FAST_DOWN = -3;
 const MINDFUL_SCROLL_PENALTY_COOLDOWN_MS = 420;
 const MINDFUL_SCORE_PASSIVE_INTERVAL = 15000;
 const MINDFUL_SCORE_PASSIVE_GAIN = 1;
+const MINDFUL_PASSIVE_BLOCK_AFTER_FAST_SCROLL_MS = 20000;
 const BOTTOM_BAR_SHOW_SCROLL_PX = 28;
 const BOTTOM_BAR_HIDE_SCROLL_PX = 40;
 const BOTTOM_BAR_SCROLL_DELTA_MIN = 2;
@@ -404,6 +408,7 @@ export default function HomePage() {
   const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(false);
   const [showBreathOverlay, setShowBreathOverlay] = useState(false);
   const [isBreathSoundReady, setIsBreathSoundReady] = useState(false);
+  const [showScoreInfo, setShowScoreInfo] = useState(false);
 
   const inFlightRef = useRef({});
   const seenIdsRef = useRef(new Set());
@@ -429,6 +434,7 @@ export default function HomePage() {
   const mindfulScoreRef = useRef(0);
   const activeVisibleMsRef = useRef(0);
   const activeVisibleTickRef = useRef(0);
+  const lastRapidDownScrollAtRef = useRef(0);
   const wakeLockRef = useRef(null);
   const breathAudioRef = useRef(null);
   const breathCircleRef = useRef(null);
@@ -1302,7 +1308,17 @@ export default function HomePage() {
       if (category === 'feed') {
         const sinceLastPenalty = now - lastPenaltyAtRef.current;
         if (sinceLastPenalty >= MINDFUL_SCROLL_PENALTY_COOLDOWN_MS) {
-          if (speed >= MINDFUL_SCROLL_SPEED_FAST) {
+          if (delta > 0) {
+            if (speed >= MINDFUL_SCROLL_SPEED_FAST) {
+              adjustMindfulScore(MINDFUL_SCORE_PENALTY_FAST_DOWN);
+              lastPenaltyAtRef.current = now;
+              lastRapidDownScrollAtRef.current = now;
+            } else if (speed >= MINDFUL_SCROLL_SPEED_MEDIUM) {
+              adjustMindfulScore(MINDFUL_SCORE_PENALTY_MEDIUM_DOWN);
+              lastPenaltyAtRef.current = now;
+              lastRapidDownScrollAtRef.current = now;
+            }
+          } else if (speed >= MINDFUL_SCROLL_SPEED_FAST) {
             adjustMindfulScore(MINDFUL_SCORE_PENALTY_FAST);
             lastPenaltyAtRef.current = now;
           } else if (speed >= MINDFUL_SCROLL_SPEED_MEDIUM) {
@@ -1360,6 +1376,11 @@ export default function HomePage() {
 
     const timer = window.setInterval(() => {
       if (document.visibilityState !== 'visible') {
+        return;
+      }
+
+      const sinceRapidDownScroll = Date.now() - lastRapidDownScrollAtRef.current;
+      if (sinceRapidDownScroll < MINDFUL_PASSIVE_BLOCK_AFTER_FAST_SCROLL_MS) {
         return;
       }
 
@@ -1610,6 +1631,15 @@ export default function HomePage() {
     setIsAutoScrollEnabled((prev) => !prev);
   }, []);
 
+  const openScoreInfo = useCallback(() => {
+    setShowScoreInfo(true);
+    setOpenMenuSlot(null);
+  }, []);
+
+  const closeScoreInfo = useCallback(() => {
+    setShowScoreInfo(false);
+  }, []);
+
   const dismissBreathOverlay = useCallback(() => {
     setShowBreathOverlay(false);
     setIsBreathSoundReady(false);
@@ -1710,6 +1740,23 @@ export default function HomePage() {
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [openMenuSlot]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !showScoreInfo) {
+      return;
+    }
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        closeScoreInfo();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [closeScoreInfo, showScoreInfo]);
 
   useEffect(() => {
     if (showBreathOverlay) {
@@ -2199,9 +2246,19 @@ export default function HomePage() {
         <p className="subtitle"></p>
 
         <div className="topActions">
-          <div className="mindfulScoreChip" aria-live="polite">
-            <span className="mindfulScoreLabel">*</span>
-            <span className="mindfulScoreValue">{mindfulScore}</span>
+          <div className="mindfulScoreGroup">
+            <div className="mindfulScoreChip" aria-live="polite">
+              <span className="mindfulScoreLabel">*</span>
+              <span className="mindfulScoreValue">{mindfulScore}</span>
+            </div>
+            <button
+              className="scoreInfoButton"
+              type="button"
+              onClick={openScoreInfo}
+              aria-label="How score and icons work"
+              title="How score and icons work">
+              <Info size={14} aria-hidden="true" />
+            </button>
           </div>
 
           <div className="topGroup">
@@ -2288,7 +2345,7 @@ export default function HomePage() {
                         aria-pressed={isAutoScrollEnabled}
                         aria-label={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}
                         title={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}>
-                        <Timer size={14} aria-hidden="true" />
+                        <ChevronsDown size={14} aria-hidden="true" />
                       </button>
                       <button
                         className={`menuIconButton${showBreathOverlay ? ' menuIconButtonActive' : ''}`}
@@ -2297,10 +2354,9 @@ export default function HomePage() {
                         aria-pressed={showBreathOverlay}
                         aria-label="Start breathing exercise"
                         title="Start breathing exercise">
-                        <Bell size={14} aria-hidden="true" />
+                        <Leaf size={14} aria-hidden="true" />
                       </button>
                     </div>
-                    <p className="dropdownHint">More settings coming here.</p>
                   </div>
                 ) : null}
               </div>
@@ -2558,6 +2614,72 @@ export default function HomePage() {
         </div>
       ) : null}
 
+      {showScoreInfo ? (
+        <div className="dialogBackdrop" role="presentation" onClick={closeScoreInfo}>
+          <div
+            className="dialogCard scoreInfoCard"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="score-info-title"
+            onClick={(event) => event.stopPropagation()}>
+            <h3 id="score-info-title">Score and icon guide</h3>
+            <p>
+              Your score rises slowly when you stay with the feed and read, and drops when you
+              scroll too fast.
+            </p>
+            <ul className="scoreInfoList">
+              <li>+1 every 15 seconds while the feed stays visible.</li>
+              <li>Fast down scrolling gives stronger penalties than up scrolling.</li>
+              <li>Passive score gain pauses for 20 seconds after rapid down scrolling.</li>
+              <li>Reading/seeing an article adds points based on estimated read time.</li>
+            </ul>
+            <p className="scoreInfoSection">Icons</p>
+            <ul className="scoreIconList" aria-label="Icon meanings">
+              <li>
+                <InfinityIcon size={14} aria-hidden="true" /> Feed
+              </li>
+              <li>
+                <Heart size={14} aria-hidden="true" /> Saved
+              </li>
+              <li>
+                <Eye size={14} aria-hidden="true" /> Seen
+              </li>
+              <li>
+                <Settings2 size={14} aria-hidden="true" /> Voice and tools
+              </li>
+              <li>
+                <Play size={14} aria-hidden="true" /> / <Square size={14} aria-hidden="true" />{' '}
+                Ambient sound
+              </li>
+              <li>
+                <Sun size={14} aria-hidden="true" /> / <Moon size={14} aria-hidden="true" /> Theme
+              </li>
+              <li>
+                <Type size={14} aria-hidden="true" /> Text size
+              </li>
+              <li>
+                <Minus size={14} aria-hidden="true" /> Reading line
+              </li>
+              <li>
+                <ChevronsDown size={14} aria-hidden="true" /> Auto scroll
+              </li>
+              <li>
+                <Leaf size={14} aria-hidden="true" /> Breathing break
+              </li>
+              <li>
+                <Volume2 size={14} aria-hidden="true" /> Read aloud
+              </li>
+              <li>
+                <Highlighter size={14} aria-hidden="true" /> Select text
+              </li>
+            </ul>
+            <button className="retryButton" type="button" onClick={closeScoreInfo}>
+              Close
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {showBreathOverlay ? (
         <div
           className="breathOverlay"
@@ -2674,7 +2796,7 @@ export default function HomePage() {
                         aria-pressed={isAutoScrollEnabled}
                         aria-label={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}
                         title={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}>
-                        <Timer size={14} aria-hidden="true" />
+                        <ChevronsDown size={14} aria-hidden="true" />
                       </button>
                       <button
                         className={`menuIconButton${showBreathOverlay ? ' menuIconButtonActive' : ''}`}
@@ -2683,10 +2805,9 @@ export default function HomePage() {
                         aria-pressed={showBreathOverlay}
                         aria-label="Start breathing exercise"
                         title="Start breathing exercise">
-                        <Bell size={14} aria-hidden="true" />
+                        <Leaf size={14} aria-hidden="true" />
                       </button>
                     </div>
-                    <p className="dropdownHint">More settings coming here.</p>
                   </div>
                 ) : null}
               </div>
