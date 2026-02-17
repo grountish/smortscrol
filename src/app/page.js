@@ -1215,9 +1215,9 @@ export default function HomePage() {
 
     const lenis = new Lenis({
       smoothWheel: true,
-      lerp: 0.12,
-      wheelMultiplier: 0.88,
-      touchMultiplier: 1,
+      lerp: 0.065,
+      wheelMultiplier: 0.66,
+      touchMultiplier: 0.8,
       syncTouch: false,
     });
 
