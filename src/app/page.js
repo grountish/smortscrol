@@ -544,6 +544,40 @@ export default function HomePage() {
       });
       return next;
     });
+
+    setSeenItems((prev) => {
+      let changed = false;
+      const next = prev.map((item) => {
+        if (item.id !== id) {
+          return item;
+        }
+        changed = true;
+        return { ...item, ...updates };
+      });
+
+      if (changed) {
+        seenItemsRef.current = next;
+      }
+
+      return changed ? next : prev;
+    });
+
+    setFavoriteItems((prev) => {
+      let changed = false;
+      const next = prev.map((item) => {
+        if (item.id !== id) {
+          return item;
+        }
+        changed = true;
+        return { ...item, ...updates };
+      });
+
+      if (changed) {
+        favoriteItemsRef.current = next;
+      }
+
+      return changed ? next : prev;
+    });
   }, []);
 
   const toggleExpand = useCallback(
@@ -574,10 +608,9 @@ export default function HomePage() {
   const fetchBatch = useCallback(
     async (targetCategory) => {
       if (targetCategory === 'art') {
-        const fetchArtIds = async () => {
+        const fetchMetIds = async () => {
           const idSet = new Set();
 
-          // Prefer Met highlights with a rotating set of known artists/works.
           const curatedTerms = shuffleArray(curatedArtTerms).slice(0, ART_CURATED_BATCH);
           const curatedHighlightRequests = curatedTerms.map((term) =>
             fetch(
@@ -607,7 +640,6 @@ export default function HomePage() {
             }
           });
 
-          // Fallback to general search if highlights come back empty.
           if (!idSet.size) {
             const search = await fetch(
               `https://collectionapi.metmuseum.org/public/collection/v1/search?hasImages=true&q=${encodeURIComponent(
@@ -623,84 +655,167 @@ export default function HomePage() {
           return Array.from(idSet);
         };
 
-        let artCursor = cursorByCategory[targetCategory];
+        const fetchMetItems = async (metCursor) => {
+          let artIds = Array.isArray(metCursor?.ids) ? metCursor.ids : [];
+          let artIndex = Number.isFinite(metCursor?.index) ? metCursor.index : 0;
 
-        if (!artCursor?.ids) {
-          artCursor = { ids: await fetchArtIds(), index: 0 };
-        }
+          if (!artIds.length) {
+            artIds = await fetchMetIds();
+          }
 
-        let artIds = artCursor.ids;
-        let artIndex = artCursor.index;
-
-        if (artIndex >= artIds.length || !artIds.length) {
-          artIds = await fetchArtIds();
-          artIndex = 0;
-        }
-
-        const maxScans = 5;
-        let scans = 0;
-
-        while (scans < maxScans) {
-          if (artIndex >= artIds.length) {
-            artIds = await fetchArtIds();
+          if (artIndex >= artIds.length || !artIds.length) {
+            artIds = await fetchMetIds();
             artIndex = 0;
-            if (!artIds.length) {
+          }
+
+          const maxScans = 4;
+          let scans = 0;
+
+          while (scans < maxScans) {
+            if (artIndex >= artIds.length) {
+              artIds = await fetchMetIds();
+              artIndex = 0;
+              if (!artIds.length) {
+                break;
+              }
+            }
+
+            const slice = artIds.slice(artIndex, artIndex + PAGE_SIZE_ART);
+            if (!slice.length) {
               break;
             }
+
+            const detailRequests = slice.map((id) =>
+              fetch(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${id}`),
+            );
+            const detailResponses = await Promise.all(detailRequests);
+            const detailJson = await Promise.all(
+              detailResponses.map((response) => response.json()),
+            );
+
+            const categoryItems = detailJson
+              .map((item) => ({
+                id: `art-${item.objectID}`,
+                source: targetCategory,
+                title: item.title || 'Untitled work',
+                detail: [
+                  item.artistDisplayName && `Artist: ${item.artistDisplayName}`,
+                  item.objectDate && `Date: ${item.objectDate}`,
+                  item.medium && `Medium: ${item.medium}`,
+                ]
+                  .filter(Boolean)
+                  .join(' - '),
+                tag: `${item.department || 'Met Museum'} - ${CATEGORY_LABELS.art}`,
+                imageUrl: item.primaryImageSmall || item.primaryImage || null,
+                webUrl: item.objectURL || null,
+                highlight: Boolean(item.isHighlight),
+              }))
+              .filter((item) => item.imageUrl)
+              .sort((a, b) => Number(b.highlight) - Number(a.highlight));
+
+            const nextIndex = artIndex + PAGE_SIZE_ART;
+            if (categoryItems.length) {
+              return {
+                items: categoryItems,
+                cursor: {
+                  ids: artIds,
+                  index: nextIndex,
+                },
+              };
+            }
+
+            artIndex = nextIndex;
+            scans += 1;
           }
 
-          const slice = artIds.slice(artIndex, artIndex + PAGE_SIZE_ART);
-          if (!slice.length) {
-            break;
-          }
+          return {
+            items: [],
+            cursor: {
+              ids: artIds,
+              index: artIndex,
+            },
+          };
+        };
 
-          const detailRequests = slice.map((id) =>
-            fetch(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${id}`),
+        const fetchAicItems = async (aicPage) => {
+          const page = Number.isFinite(aicPage) && aicPage > 0 ? aicPage : 1;
+          const response = await fetch(
+            `https://api.artic.edu/api/v1/artworks/search?q=${encodeURIComponent(
+              ART_QUERY,
+            )}&query[term][is_public_domain]=true&page=${page}&limit=${PAGE_SIZE_ART}&fields=id,title,artist_display,date_display,medium_display,image_id`,
           );
-          const detailResponses = await Promise.all(detailRequests);
-          const detailJson = await Promise.all(detailResponses.map((response) => response.json()));
 
-          const categoryItems = detailJson
+          const json = await response.json();
+          const iiifBase = json?.config?.iiif_url || 'https://www.artic.edu/iiif/2';
+          const currentPage = Number.isFinite(json?.pagination?.current_page)
+            ? json.pagination.current_page
+            : page;
+          const totalPages = Number.isFinite(json?.pagination?.total_pages)
+            ? json.pagination.total_pages
+            : currentPage;
+          const nextPage = currentPage >= totalPages ? 1 : currentPage + 1;
+
+          const items = (Array.isArray(json?.data) ? json.data : [])
+            .filter((item) => item?.image_id)
             .map((item) => ({
-              id: `art-${item.objectID}`,
+              id: `art-aic-${item.id}`,
               source: targetCategory,
               title: item.title || 'Untitled work',
               detail: [
-                item.artistDisplayName && `Artist: ${item.artistDisplayName}`,
-                item.objectDate && `Date: ${item.objectDate}`,
-                item.medium && `Medium: ${item.medium}`,
+                item.artist_display && `Artist: ${item.artist_display}`,
+                item.date_display && `Date: ${item.date_display}`,
+                item.medium_display && `Medium: ${item.medium_display}`,
               ]
                 .filter(Boolean)
                 .join(' - '),
-              tag: `${item.department || 'Met Collection'} - ${CATEGORY_LABELS.art}`,
-              imageUrl: item.primaryImageSmall || item.primaryImage || null,
-              webUrl: item.objectURL || null,
-              highlight: Boolean(item.isHighlight),
-            }))
-            .filter((item) => item.imageUrl)
-            // Prefer highlighted / better-known works first.
-            .sort((a, b) => Number(b.highlight) - Number(a.highlight));
+              tag: `Art Institute of Chicago - ${CATEGORY_LABELS.art}`,
+              imageUrl: `${iiifBase}/${item.image_id}/full/843,/0/default.jpg`,
+              webUrl: `https://www.artic.edu/artworks/${item.id}`,
+              highlight: false,
+            }));
 
-          const nextIndex = artIndex + PAGE_SIZE_ART;
-          if (categoryItems.length) {
-            return {
-              items: categoryItems,
-              cursor: {
-                ids: artIds,
-                index: nextIndex,
-              },
-            };
+          return {
+            items,
+            nextPage,
+          };
+        };
+
+        const storedArtCursor = cursorByCategory[targetCategory] || {};
+        const metCursor = storedArtCursor.met || storedArtCursor;
+        const aicPage = storedArtCursor.aic?.page || 1;
+
+        const [metBatch, aicBatch] = await Promise.allSettled([
+          fetchMetItems(metCursor),
+          fetchAicItems(aicPage),
+        ]);
+
+        const metItems = metBatch.status === 'fulfilled' ? metBatch.value.items : [];
+        const aicItems = aicBatch.status === 'fulfilled' ? aicBatch.value.items : [];
+
+        if (!metItems.length && !aicItems.length) {
+          if (metBatch.status === 'rejected') {
+            throw metBatch.reason || new Error('Could not fetch art items.');
           }
-
-          artIndex = nextIndex;
-          scans += 1;
+          if (aicBatch.status === 'rejected') {
+            throw aicBatch.reason || new Error('Could not fetch art items.');
+          }
         }
 
+        const mixedItems = shuffleArray(interleave([metItems, aicItems]));
+
         return {
-          items: [],
+          items: mixedItems,
           cursor: {
-            ids: artIds,
-            index: artIndex,
+            met:
+              metBatch.status === 'fulfilled'
+                ? metBatch.value.cursor
+                : {
+                    ids: Array.isArray(metCursor?.ids) ? metCursor.ids : [],
+                    index: Number.isFinite(metCursor?.index) ? metCursor.index : 0,
+                  },
+            aic: {
+              page: aicBatch.status === 'fulfilled' ? aicBatch.value.nextPage : aicPage,
+            },
           },
         };
       }
@@ -1538,13 +1653,13 @@ export default function HomePage() {
   return (
     <main className={`page${isDarkMode ? ' pageDark' : ''}${isLargeText ? ' pageLargeText' : ''}`}>
       <header className="headerWrap">
-        <p className="kicker"></p>
-        <h1 className="title">...</h1>
+        <p className="kicker">the more u scroll, the higher ur score </p>
+        <h1 className="title">_</h1>
         <p className="subtitle"></p>
 
         <div className="topActions">
           <div className="mindfulScoreChip" aria-live="polite">
-            <span className="mindfulScoreLabel">Mindful</span>
+            <span className="mindfulScoreLabel">*</span>
             <span className="mindfulScoreValue">{mindfulScore}</span>
           </div>
 
@@ -1908,7 +2023,7 @@ export default function HomePage() {
               </button>
 
               <div
-                className="mindfulScoreChip mindfulScoreChipNumber"
+                className="mindfulScoreChip mindfulScoreChipNumber marging-right"
                 aria-live="polite"
                 aria-label={`Mindful score ${mindfulScore}`}>
                 <span className="mindfulScoreValue">{mindfulScore}</span>

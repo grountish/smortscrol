@@ -163,6 +163,11 @@ body {
         color: var(--ink);
         padding: 6px 10px;
         border-radius: 999px;
+
+}
+
+.marging-right {
+        margin-left: 2rem;
 }
 
 .mindfulScoreLabel {
@@ -180,7 +185,7 @@ body {
 }
 
 .mindfulScoreChipNumber {
-        padding: 6px 8px;
+        padding: 7px 7px;
         min-width: 44px;
         justify-content: center;
 }
