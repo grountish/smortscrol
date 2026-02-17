@@ -2,20 +2,24 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Bell,
   BookText,
+  ChevronDown,
   Eye,
   Heart,
   Highlighter,
   Infinity as InfinityIcon,
+  Minus,
   Moon,
   Play,
-  Speech,
+  Settings2,
+  SlidersHorizontal,
   Square,
   Sun,
+  Timer,
   Type,
   Volume2,
 } from 'lucide-react';
-import Lenis from 'lenis';
 import curatedArtTerms from '../data/art_highlights.json';
 
 const CATEGORIES = [
@@ -53,6 +57,7 @@ const PAGE_SIZE_ART = 10;
 const LOAD_MORE_BATCH_MAX = 7;
 const ART_CURATED_BATCH = 12;
 const CONTROL_ICON_SIZE = 16;
+const AVERAGE_READING_WPM = 220;
 const WIKI_PAGE_SIZE = 20;
 const WIKI_RANDOM_START_MAX = 60;
 const SHORT_TEXT_LIMIT = 160;
@@ -65,7 +70,11 @@ const CURSOR_STORAGE_KEY = 'smortscroll:cursor';
 const THEME_STORAGE_KEY = 'smortscroll:theme';
 const TEXT_SIZE_STORAGE_KEY = 'smortscroll:text-size';
 const MINDFUL_SCORE_STORAGE_KEY = 'smortscroll:mindful-score';
-const TRIVIA_INSERT_EVERY = 5;
+const READING_GUIDE_STORAGE_KEY = 'smortscroll:reading-guide';
+const AUTO_SCROLL_STORAGE_KEY = 'smortscroll:auto-scroll';
+const AUTO_SCROLL_STEP_PX = 100;
+const AUTO_SCROLL_STEP_MS = 5500;
+const FALLBACK_IMAGE_URL = '/icons/icon-512.png';
 const MINDFUL_SCORE_MIN = 0;
 const MINDFUL_SCORE_MAX = 9999;
 const MINDFUL_SCROLL_SPEED_MEDIUM = 1200;
@@ -94,13 +103,61 @@ const FEED_SOURCES = [
   'anthropology-facts',
 ];
 const FEED_SOURCE_BATCH = 3;
+const PHILOSOPHER_NAMES = [
+  'Socrates',
+  'Plato',
+  'Aristotle',
+  'Heraclitus',
+  'Epicurus',
+  'Lucretius',
+  'Confucius',
+  'Laozi',
+  'Nagarjuna',
+  'Avicenna',
+  'Averroes',
+  'Thomas Aquinas',
+  'René Descartes',
+  'Baruch Spinoza',
+  'Gottfried Wilhelm Leibniz',
+  'David Hume',
+  'John Locke',
+  'Jean-Jacques Rousseau',
+  'Immanuel Kant',
+  'G. W. F. Hegel',
+  'Arthur Schopenhauer',
+  'John Stuart Mill',
+  'Søren Kierkegaard',
+  'Karl Marx',
+  'Friedrich Nietzsche',
+  'Henri Bergson',
+  'Marquis de Sade',
+  'Bertrand Russell',
+  'Ludwig Wittgenstein',
+  'Martin Heidegger',
+  'Jean-Paul Sartre',
+  'Hannah Arendt',
+  'Simone de Beauvoir',
+  'Albert Camus',
+  'W. E. B. Du Bois',
+  'Frantz Fanon',
+  'Hypatia',
+  'G. E. M. Anscombe',
+  'Philippa Foot',
+  'Mary Midgley',
+  'Martha Nussbaum',
+  'Judith Butler',
+  'Angela Davis',
+  'Byung-Chul Han',
+  'Slavoj Žižek',
+];
+const PHILOSOPHER_BATCH_SIZE = 8;
 const WIKI_SEARCH = {
   'art-history':
     'art history OR art movement OR painter OR sculptor OR picasso OR manet OR monet OR vangogh OR "van gogh" OR michelangelo OR "da vinci" OR cezanne OR renoir OR "aristide maillol" OR "henrietta rae" OR "aristide maillol" OR "female painter" OR gentileschi OR "frida kahlo" OR "georgia o keeffe" OR "mary cassatt" OR "berthe morisot" OR "suzanne valadon" OR "tamara de lempicka" OR "leonor fini" OR "alice neel" OR "lynette yiadom"',
   'music-history':
     'music history OR composer OR symphony OR jazz history OR beethoven OR mozart OR "florence price" OR "nina simone" OR "billie holiday" OR "ella fitzgerald" OR "clara schumann" OR "fanny mendelssohn" OR "hildegard von bingen" OR "louise farrenc" OR "lili boulanger" OR "ethel smyth" OR "margaret bonds"',
   philosophy:
-    'philosophy OR philosopher OR ethics OR epistemology OR plato OR aristotle OR descartes OR hume OR spinoza OR kant OR nietzsche OR sartre OR "hannah arendt" OR "simone de beauvoir" OR hypatia OR "elizabeth anscombe" OR "philippa foot" OR "mary midgley" OR "susanne langer" OR "julia kristeva" OR "angela davis" OR "martha nussbaum" OR "judith butler"',
+    'plato OR aristotle OR socrates OR heraclitus OR epicurus OR epicuro OR lucretius OR lucrecious OR confucius OR "laozi" OR "nagarjuna" OR "avicenna" OR "averroes" OR "thomas aquinas" OR "rene descartes" OR "baruch spinoza" OR spinoza OR "gottfried leibniz" OR "david hume" OR "john locke" OR "jean-jacques rousseau" OR "immanuel kant" OR "g.w.f. hegel" OR "arthur schopenhauer" OR "john stuart mill" OR "soren kierkegaard" OR "karl marx" OR "friedrich nietzsche" OR "henri bergson" OR bergson OR "marquis de sade" OR "marques de sade" OR "donatien alphonse francois" OR "bertrand russell" OR "ludwig wittgenstein" OR "martin heidegger" OR "jean-paul sartre" OR "hannah arendt" OR "simone de beauvoir" OR "albert camus" OR "w.e.b. du bois" OR "frantz fanon" OR "hypatia" OR "elizabeth anscombe" OR "philippa foot" OR "mary midgley" OR "susan wolf" OR "martha nussbaum" OR "judith butler" OR "angela davis" OR "byung-chul han" OR "slavoj zizek"',
   science:
     'science OR physics OR biology OR chemistry OR astronomy OR einstein OR newton OR curie OR darwin OR hawking OR feynman OR "marie curie" OR "chandra" OR "vera rubin" OR "cecilia payne" OR "rosalind franklin" OR "jocelyn bell" OR "ada lovelace" OR "hedy lamarr" OR "katherine johnson" OR "dorothy hodgkin" OR "barbara mcclintock"',
   'computer-science':
@@ -193,6 +250,20 @@ function estimateReadingLines(item) {
 
   const estimated = Math.ceil(text.length / 80);
   return Math.min(36, Math.max(2, estimated));
+}
+
+function estimateReadMinutes(item) {
+  const text = [item?.title, item?.detailFull, item?.detail]
+    .filter((part) => typeof part === 'string' && part.trim())
+    .join(' ')
+    .trim();
+
+  if (!text) {
+    return 1;
+  }
+
+  const words = text.split(/\s+/).filter(Boolean).length;
+  return Math.max(1, Math.ceil(words / AVERAGE_READING_WPM));
 }
 
 function getParagraphs(text) {
@@ -327,6 +398,9 @@ export default function HomePage() {
   const [showBottomBar, setShowBottomBar] = useState(false);
   const [isAmbientPlaying, setIsAmbientPlaying] = useState(false);
   const [mindfulScore, setMindfulScore] = useState(0);
+  const [openMenuSlot, setOpenMenuSlot] = useState(null);
+  const [showReadingGuide, setShowReadingGuide] = useState(false);
+  const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(false);
 
   const inFlightRef = useRef({});
   const seenIdsRef = useRef(new Set());
@@ -344,13 +418,15 @@ export default function HomePage() {
   const loadMoreSentinelRef = useRef(null);
   const feedSourceOrderRef = useRef(shuffleArray(FEED_SOURCES));
   const feedSourceIndexRef = useRef(0);
-  const feedLoadCountRef = useRef(0);
   const lastScrollYRef = useRef(0);
   const lastScrollAtRef = useRef(0);
   const lastPenaltyAtRef = useRef(0);
   const upScrollAccumRef = useRef(0);
   const downScrollAccumRef = useRef(0);
   const mindfulScoreRef = useRef(0);
+  const wakeLockRef = useRef(null);
+  const topMenuRef = useRef(null);
+  const bottomMenuRef = useRef(null);
 
   const items = useMemo(() => itemsByCategory[category] || [], [itemsByCategory, category]);
 
@@ -504,44 +580,6 @@ export default function HomePage() {
     const firstKey = pages ? Object.keys(pages)[0] : null;
     const page = firstKey ? pages[firstKey] : null;
     return page?.extract || null;
-  }, []);
-
-  const fetchRandomTriviaItem = useCallback(async () => {
-    const response = await fetch('/api/random-trivia', {
-      method: 'GET',
-      cache: 'no-store',
-    });
-
-    if (!response.ok) {
-      throw new Error(`Trivia request failed with status ${response.status}`);
-    }
-
-    const data = await response.json();
-    const triviaText = [
-      data?.trivia,
-      data?.fact,
-      data?.text,
-      data?.description,
-      data?.message,
-      data?.result,
-    ]
-      .filter((entry) => typeof entry === 'string' && entry.trim())
-      .map((entry) => entry.trim())[0];
-
-    if (!triviaText) {
-      return null;
-    }
-
-    return {
-      id: `trivia-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      source: 'trivia',
-      title: 'Random Fact',
-      detail: sanitizeWikiText(triviaText),
-      detailFull: null,
-      tag: '!',
-      webUrl: data?.sourceUrl || data?.url || null,
-      imageUrl: null,
-    };
   }, []);
 
   const updateItemById = useCallback((id, updates) => {
@@ -828,6 +866,51 @@ export default function HomePage() {
         };
       }
 
+      if (targetCategory === 'philosophy') {
+        const baseOrder = PHILOSOPHER_NAMES;
+        const previousCursor = cursorByCategory[targetCategory] || {};
+        const initialIndex = Number.isFinite(previousCursor.index)
+          ? previousCursor.index
+          : Math.floor(Math.random() * baseOrder.length);
+
+        const selectedNames = [];
+        for (
+          let index = 0;
+          index < Math.min(PHILOSOPHER_BATCH_SIZE, baseOrder.length);
+          index += 1
+        ) {
+          selectedNames.push(baseOrder[(initialIndex + index) % baseOrder.length]);
+        }
+
+        const summaryRequests = selectedNames.map((name) =>
+          fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(name)}`),
+        );
+        const summaryResponses = await Promise.all(summaryRequests);
+        const summaries = await Promise.all(summaryResponses.map((response) => response.json()));
+
+        const items = summaries
+          .filter(
+            (item) => item?.type !== 'https://mediawiki.org/wiki/HyperSwitch/errors/not_found',
+          )
+          .map((item, index) => ({
+            id: `${targetCategory}-${item.pageid || selectedNames[index].toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+            source: targetCategory,
+            title: item.title || selectedNames[index],
+            detail: sanitizeWikiText(item.extract),
+            detailFull: null,
+            wikiTitle: item.title || selectedNames[index],
+            tag: CATEGORY_LABELS[targetCategory],
+            webUrl: item.content_urls?.desktop?.page || null,
+            imageUrl: item.originalimage?.source || item.thumbnail?.source || null,
+          }))
+          .filter((item) => item.detail);
+
+        return {
+          items,
+          cursor: { index: (initialIndex + PHILOSOPHER_BATCH_SIZE) % baseOrder.length },
+        };
+      }
+
       if (WIKI_SEARCH[targetCategory]) {
         const fetchWikiSummaries = async (topic, offset) => {
           const searchResponse = await fetch(
@@ -987,18 +1070,6 @@ export default function HomePage() {
               return updates;
             });
           }
-
-          feedLoadCountRef.current += 1;
-          if (feedLoadCountRef.current % TRIVIA_INSERT_EVERY === 0) {
-            try {
-              const triviaItem = await fetchRandomTriviaItem();
-              if (triviaItem) {
-                nextItems = shuffleArray([triviaItem, ...nextItems]);
-              }
-            } catch {
-              // Ignore trivia API failures and continue with normal feed items.
-            }
-          }
         } else {
           const batch = await fetchBatch(targetCategory);
           nextItems = batch.items;
@@ -1043,7 +1114,7 @@ export default function HomePage() {
         setLoadingByCategory((prev) => ({ ...prev, [targetCategory]: false }));
       }
     },
-    [fetchBatch, fetchRandomTriviaItem, getNextFeedSources],
+    [fetchBatch, getNextFeedSources],
   );
 
   useEffect(() => {
@@ -1205,43 +1276,6 @@ export default function HomePage() {
       return;
     }
 
-    const prefersReducedMotion =
-      typeof window.matchMedia === 'function' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-    if (prefersReducedMotion) {
-      return;
-    }
-
-    const lenis = new Lenis({
-      smoothWheel: true,
-      lerp: 0.065,
-      wheelMultiplier: 0.66,
-      touchMultiplier: 0.8,
-      syncTouch: false,
-    });
-
-    let frameId = null;
-    const raf = (time) => {
-      lenis.raf(time);
-      frameId = window.requestAnimationFrame(raf);
-    };
-
-    frameId = window.requestAnimationFrame(raf);
-
-    return () => {
-      if (frameId) {
-        window.cancelAnimationFrame(frameId);
-      }
-      lenis.destroy();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-
     lastScrollAtRef.current = Date.now();
 
     const onScroll = () => {
@@ -1251,6 +1285,12 @@ export default function HomePage() {
       const delta = currentY - lastScrollYRef.current;
       const beyondHeader = currentY > 120;
       const speed = Math.abs(delta) * (1000 / elapsed);
+
+      if (isAutoScrollEnabled) {
+        lastScrollAtRef.current = now;
+        lastScrollYRef.current = currentY;
+        return;
+      }
 
       if (category === 'feed') {
         const sinceLastPenalty = now - lastPenaltyAtRef.current;
@@ -1304,7 +1344,7 @@ export default function HomePage() {
     return () => {
       window.removeEventListener('scroll', onScroll);
     };
-  }, [adjustMindfulScore, category]);
+  }, [adjustMindfulScore, category, isAutoScrollEnabled]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || category !== 'feed') {
@@ -1414,10 +1454,51 @@ export default function HomePage() {
     [availableVoices.length, selectedVoiceIndex],
   );
 
+  const releaseWakeLock = useCallback(async () => {
+    const wakeLock = wakeLockRef.current;
+    if (!wakeLock) {
+      return;
+    }
+
+    wakeLockRef.current = null;
+    try {
+      await wakeLock.release();
+    } catch {
+      // Ignore wake lock release failures.
+    }
+  }, []);
+
+  const requestWakeLock = useCallback(async () => {
+    if (typeof window === 'undefined' || typeof navigator === 'undefined') {
+      return;
+    }
+
+    if (
+      !('wakeLock' in navigator) ||
+      wakeLockRef.current ||
+      document.visibilityState !== 'visible'
+    ) {
+      return;
+    }
+
+    try {
+      const wakeLock = await navigator.wakeLock.request('screen');
+      wakeLockRef.current = wakeLock;
+      wakeLock.addEventListener?.('release', () => {
+        if (wakeLockRef.current === wakeLock) {
+          wakeLockRef.current = null;
+        }
+      });
+    } catch {
+      // Ignore wake lock request failures.
+    }
+  }, []);
+
   const stopReadAloud = useCallback(() => {
     if (typeof window === 'undefined' || !window.speechSynthesis) {
       speakingItemIdRef.current = null;
       setSpeakingItemId(null);
+      void releaseWakeLock();
       return;
     }
 
@@ -1425,7 +1506,8 @@ export default function HomePage() {
     utteranceRef.current = null;
     speakingItemIdRef.current = null;
     setSpeakingItemId(null);
-  }, []);
+    void releaseWakeLock();
+  }, [releaseWakeLock]);
 
   const toggleReadAloud = useCallback(
     (item) => {
@@ -1486,29 +1568,103 @@ export default function HomePage() {
     [selectedVoice, stopReadAloud],
   );
 
-  const cycleVoice = useCallback(() => {
-    if (!availableVoices.length) {
+  const selectVoice = useCallback(
+    (voiceUri) => {
+      if (!voiceUri) {
+        return;
+      }
+
+      setSelectedVoiceUri(voiceUri);
+
+      if (typeof window !== 'undefined') {
+        try {
+          window.localStorage.setItem(VOICE_STORAGE_KEY, voiceUri);
+        } catch {
+          // Ignore storage write failures.
+        }
+      }
+
+      if (speakingItemIdRef.current) {
+        stopReadAloud();
+      }
+    },
+    [stopReadAloud],
+  );
+
+  const toggleSettingsMenu = useCallback((slot) => {
+    setOpenMenuSlot((prev) => (prev === slot ? null : slot));
+  }, []);
+
+  const toggleReadingGuide = useCallback(() => {
+    setShowReadingGuide((prev) => !prev);
+  }, []);
+
+  const toggleAutoScroll = useCallback(() => {
+    setIsAutoScrollEnabled((prev) => !prev);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !openMenuSlot) {
       return;
     }
 
-    const currentIndex = availableVoices.findIndex((voice) => voice.voiceURI === selectedVoiceUri);
-    const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % availableVoices.length;
-    const nextVoice = availableVoices[nextIndex];
-
-    setSelectedVoiceUri(nextVoice.voiceURI);
-
-    if (typeof window !== 'undefined') {
-      try {
-        window.localStorage.setItem(VOICE_STORAGE_KEY, nextVoice.voiceURI);
-      } catch {
-        // Ignore storage write failures.
+    const onPointerDown = (event) => {
+      const target = event.target;
+      if (
+        (topMenuRef.current && topMenuRef.current.contains(target)) ||
+        (bottomMenuRef.current && bottomMenuRef.current.contains(target))
+      ) {
+        return;
       }
+
+      setOpenMenuSlot(null);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setOpenMenuSlot(null);
+      }
+    };
+
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [openMenuSlot]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
     }
 
-    if (speakingItemIdRef.current) {
-      stopReadAloud();
+    const handleVisibility = () => {
+      if (document.visibilityState !== 'visible') {
+        void releaseWakeLock();
+        return;
+      }
+
+      if (speakingItemIdRef.current) {
+        void requestWakeLock();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [releaseWakeLock, requestWakeLock]);
+
+  useEffect(() => {
+    if (speakingItemId) {
+      void requestWakeLock();
+      return;
     }
-  }, [availableVoices, selectedVoiceUri, stopReadAloud]);
+
+    void releaseWakeLock();
+  }, [releaseWakeLock, requestWakeLock, speakingItemId]);
 
   const toggleAmbientSound = useCallback(async () => {
     if (typeof window === 'undefined') {
@@ -1576,7 +1732,105 @@ export default function HomePage() {
     }
   }, [cursorByCategory]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      const storedValue = window.localStorage.getItem(READING_GUIDE_STORAGE_KEY);
+      setShowReadingGuide(storedValue === '1');
+    } catch {
+      // Ignore storage read failures.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(READING_GUIDE_STORAGE_KEY, showReadingGuide ? '1' : '0');
+    } catch {
+      // Ignore storage write failures.
+    }
+  }, [showReadingGuide]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      const storedValue = window.localStorage.getItem(AUTO_SCROLL_STORAGE_KEY);
+      setIsAutoScrollEnabled(storedValue === '1');
+    } catch {
+      // Ignore storage read failures.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(AUTO_SCROLL_STORAGE_KEY, isAutoScrollEnabled ? '1' : '0');
+    } catch {
+      // Ignore storage write failures.
+    }
+  }, [isAutoScrollEnabled]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !isAutoScrollEnabled) {
+      return;
+    }
+
+    const startedAt = performance.now();
+    const intervalId = window.setInterval(() => {
+      const root = document.documentElement;
+      const maxScroll = Math.max(0, root.scrollHeight - window.innerHeight);
+
+      if (window.scrollY >= maxScroll - 1) {
+        setIsAutoScrollEnabled(false);
+        return;
+      }
+
+      window.scrollBy({
+        top: AUTO_SCROLL_STEP_PX,
+        left: 0,
+        behavior: 'smooth',
+      });
+    }, AUTO_SCROLL_STEP_MS);
+
+    setShowBottomBar(false);
+
+    const stopAutoScroll = () => {
+      if (performance.now() - startedAt < 500) {
+        return;
+      }
+      setIsAutoScrollEnabled(false);
+    };
+
+    window.addEventListener('wheel', stopAutoScroll, { passive: true });
+    window.addEventListener('touchstart', stopAutoScroll, { passive: true });
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('wheel', stopAutoScroll);
+      window.removeEventListener('touchstart', stopAutoScroll);
+    };
+  }, [isAutoScrollEnabled]);
+
   useEffect(() => () => stopReadAloud(), [stopReadAloud]);
+
+  useEffect(
+    () => () => {
+      void releaseWakeLock();
+    },
+    [releaseWakeLock],
+  );
 
   useEffect(
     () => () => {
@@ -1643,8 +1897,27 @@ export default function HomePage() {
     });
   }, []);
 
+  const handleImageLoadError = useCallback((event) => {
+    const image = event.currentTarget;
+    if (!image) {
+      return;
+    }
+
+    if (image.dataset.fallbackApplied === 'true') {
+      return;
+    }
+
+    image.dataset.fallbackApplied = 'true';
+    image.src = FALLBACK_IMAGE_URL;
+  }, []);
+
   useEffect(() => {
-    if (category !== 'feed' || typeof window === 'undefined' || !window.IntersectionObserver) {
+    if (
+      category !== 'feed' ||
+      isAutoScrollEnabled ||
+      typeof window === 'undefined' ||
+      !window.IntersectionObserver
+    ) {
       return;
     }
 
@@ -1686,7 +1959,7 @@ export default function HomePage() {
     return () => {
       observer.disconnect();
     };
-  }, [category, filteredItems, trackSeenByViewing]);
+  }, [category, filteredItems, isAutoScrollEnabled, trackSeenByViewing]);
 
   useEffect(() => {
     if (category !== 'feed' || typeof window === 'undefined' || !window.IntersectionObserver) {
@@ -1726,7 +1999,9 @@ export default function HomePage() {
   return (
     <main className={`page${isDarkMode ? ' pageDark' : ''}${isLargeText ? ' pageLargeText' : ''}`}>
       <header className="headerWrap">
-        <p className="kicker">the more u scroll, the higher ur score </p>
+        <p className="kicker">
+          the more u scroll, <br /> the higher ur score{' '}
+        </p>
         <h1 className="title">_</h1>
         <p className="subtitle"></p>
 
@@ -1760,23 +2035,80 @@ export default function HomePage() {
             <span className="topDivider" aria-hidden="true" />
 
             <div className="topControls">
-              <button
-                className="installButton"
-                type="button"
-                onClick={cycleVoice}
-                disabled={!availableVoices.length}
-                aria-label={
-                  selectedVoice
-                    ? `Change read aloud voice. Current: ${selectedVoice.name}`
-                    : 'Change read aloud voice'
-                }
-                title={selectedVoice ? `Voice: ${selectedVoice.name}` : 'Change read aloud voice'}>
-                <Speech
-                  size={CONTROL_ICON_SIZE}
-                  aria-hidden="true"
-                  style={{ color: voiceIconColor }}
-                />
-              </button>
+              <div className="menuWrap" ref={topMenuRef}>
+                <button
+                  className="installButton menuTrigger"
+                  type="button"
+                  onClick={() => toggleSettingsMenu('top')}
+                  aria-haspopup="menu"
+                  aria-expanded={openMenuSlot === 'top'}
+                  aria-label={
+                    selectedVoice
+                      ? `Voice settings. Current: ${selectedVoice.name}`
+                      : 'Voice settings'
+                  }
+                  title={selectedVoice ? `Voice: ${selectedVoice.name}` : 'Voice settings'}>
+                  <Settings2 size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                  <ChevronDown size={12} aria-hidden="true" className="menuChevron" />
+                </button>
+
+                {openMenuSlot === 'top' ? (
+                  <div className="dropdownMenu" role="menu" aria-label="Voice and settings">
+                    <label className="dropdownLabel" htmlFor="voice-select-top">
+                      Voice
+                    </label>
+                    <select
+                      id="voice-select-top"
+                      className="dropdownSelect"
+                      value={selectedVoiceUri || ''}
+                      onChange={(event) => {
+                        selectVoice(event.target.value);
+                        setOpenMenuSlot(null);
+                      }}
+                      disabled={!availableVoices.length}>
+                      {!availableVoices.length ? (
+                        <option value="">No voices available</option>
+                      ) : (
+                        availableVoices.map((voice) => (
+                          <option key={voice.voiceURI} value={voice.voiceURI}>
+                            {voice.name}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <div className="menuIconRow" aria-label="Upcoming tools">
+                      <button
+                        className={`menuIconButton${showReadingGuide ? ' menuIconButtonActive' : ''}`}
+                        type="button"
+                        onClick={toggleReadingGuide}
+                        aria-pressed={showReadingGuide}
+                        aria-label={
+                          showReadingGuide ? 'Disable reading line' : 'Enable reading line'
+                        }
+                        title={showReadingGuide ? 'Disable reading line' : 'Enable reading line'}>
+                        <Minus size={14} aria-hidden="true" />
+                      </button>
+                      <button
+                        className={`menuIconButton${isAutoScrollEnabled ? ' menuIconButtonActive' : ''}`}
+                        type="button"
+                        onClick={toggleAutoScroll}
+                        aria-pressed={isAutoScrollEnabled}
+                        aria-label={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}
+                        title={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}>
+                        <Timer size={14} aria-hidden="true" />
+                      </button>
+                      <button
+                        className="menuIconButton"
+                        type="button"
+                        disabled
+                        aria-label="Alerts coming soon">
+                        <Bell size={14} aria-hidden="true" />
+                      </button>
+                    </div>
+                    <p className="dropdownHint">More settings coming here.</p>
+                  </div>
+                ) : null}
+              </div>
 
               <button
                 className="installButton"
@@ -1824,6 +2156,7 @@ export default function HomePage() {
           const isExpanded = Boolean(expandedIds[item.id]);
           const isLoadingFull = Boolean(loadingFullText[item.id]);
           const fullText = item.detailFull || item.detail;
+          const readMinutes = estimateReadMinutes(item);
           const displayText = isExpanded
             ? isLoadingFull
               ? 'Loading full text...'
@@ -1860,12 +2193,21 @@ export default function HomePage() {
                     event.stopPropagation();
                     setActiveImage(item.imageUrl);
                   }}>
-                  <img src={item.imageUrl} className="cardImage" alt={item.title} loading="lazy" />
+                  <img
+                    src={item.imageUrl}
+                    className="cardImage"
+                    alt={item.title}
+                    loading="lazy"
+                    onError={handleImageLoadError}
+                  />
                 </button>
               ) : null}
 
               <div className="cardMeta">
-                <p className="cardTag">{item.tag}</p>
+                <div className="cardMetaLead">
+                  <p className="cardTag">{item.tag}</p>
+                  <p className="cardReadTime">{readMinutes} min read</p>
+                </div>
                 <div className="cardActions">
                   {category === 'feed' ? (
                     <button
@@ -2012,9 +2354,16 @@ export default function HomePage() {
 
       {activeImage ? (
         <div className="modalBackdrop" role="presentation" onClick={() => setActiveImage(null)}>
-          <img src={activeImage} className="modalImage" alt="Expanded artwork" />
+          <img
+            src={activeImage}
+            className="modalImage"
+            alt="Expanded artwork"
+            onError={handleImageLoadError}
+          />
         </div>
       ) : null}
+
+      {showReadingGuide ? <div className="readingGuide" aria-hidden="true" /> : null}
 
       {showBottomBar ? (
         <div className="bottomBar" role="navigation" aria-label="Quick controls">
@@ -2042,23 +2391,83 @@ export default function HomePage() {
             <span className="topDivider" aria-hidden="true" />
 
             <div className="topControls">
-              <button
-                className="installButton"
-                type="button"
-                onClick={cycleVoice}
-                disabled={!availableVoices.length}
-                aria-label={
-                  selectedVoice
-                    ? `Change read aloud voice. Current: ${selectedVoice.name}`
-                    : 'Change read aloud voice'
-                }
-                title={selectedVoice ? `Voice: ${selectedVoice.name}` : 'Change read aloud voice'}>
-                <Speech
-                  size={CONTROL_ICON_SIZE}
-                  aria-hidden="true"
-                  style={{ color: voiceIconColor }}
-                />
-              </button>
+              <div className="menuWrap" ref={bottomMenuRef}>
+                <button
+                  className="installButton menuTrigger"
+                  type="button"
+                  onClick={() => toggleSettingsMenu('bottom')}
+                  aria-haspopup="menu"
+                  aria-expanded={openMenuSlot === 'bottom'}
+                  aria-label={
+                    selectedVoice
+                      ? `Voice settings. Current: ${selectedVoice.name}`
+                      : 'Voice settings'
+                  }
+                  title={selectedVoice ? `Voice: ${selectedVoice.name}` : 'Voice settings'}>
+                  <Settings2 size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                  <ChevronDown size={12} aria-hidden="true" className="menuChevron" />
+                </button>
+
+                {openMenuSlot === 'bottom' ? (
+                  <div
+                    className="dropdownMenu dropdownMenuUp"
+                    role="menu"
+                    aria-label="Voice and settings">
+                    <label className="dropdownLabel" htmlFor="voice-select-bottom">
+                      Voice
+                    </label>
+                    <select
+                      id="voice-select-bottom"
+                      className="dropdownSelect"
+                      value={selectedVoiceUri || ''}
+                      onChange={(event) => {
+                        selectVoice(event.target.value);
+                        setOpenMenuSlot(null);
+                      }}
+                      disabled={!availableVoices.length}>
+                      {!availableVoices.length ? (
+                        <option value="">No voices available</option>
+                      ) : (
+                        availableVoices.map((voice) => (
+                          <option key={voice.voiceURI} value={voice.voiceURI}>
+                            {voice.name}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <div className="menuIconRow" aria-label="Upcoming tools">
+                      <button
+                        className={`menuIconButton${showReadingGuide ? ' menuIconButtonActive' : ''}`}
+                        type="button"
+                        onClick={toggleReadingGuide}
+                        aria-pressed={showReadingGuide}
+                        aria-label={
+                          showReadingGuide ? 'Disable reading line' : 'Enable reading line'
+                        }
+                        title={showReadingGuide ? 'Disable reading line' : 'Enable reading line'}>
+                        <Minus size={14} aria-hidden="true" />
+                      </button>
+                      <button
+                        className={`menuIconButton${isAutoScrollEnabled ? ' menuIconButtonActive' : ''}`}
+                        type="button"
+                        onClick={toggleAutoScroll}
+                        aria-pressed={isAutoScrollEnabled}
+                        aria-label={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}
+                        title={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}>
+                        <Timer size={14} aria-hidden="true" />
+                      </button>
+                      <button
+                        className="menuIconButton"
+                        type="button"
+                        disabled
+                        aria-label="Alerts coming soon">
+                        <Bell size={14} aria-hidden="true" />
+                      </button>
+                    </div>
+                    <p className="dropdownHint">More settings coming here.</p>
+                  </div>
+                ) : null}
+              </div>
 
               <button
                 className="installButton"
@@ -2096,7 +2505,7 @@ export default function HomePage() {
               </button>
 
               <div
-                className="mindfulScoreChip mindfulScoreChipNumber marging-right"
+                className="mindfulScoreChip mindfulScoreChipNumber"
                 aria-live="polite"
                 aria-label={`Mindful score ${mindfulScore}`}>
                 <span className="mindfulScoreValue">{mindfulScore}</span>
