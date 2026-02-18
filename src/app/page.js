@@ -1023,26 +1023,27 @@ export default function HomePage() {
         const offset =
           Number.isFinite(localCursor?.offset) && localCursor.offset >= 0 ? localCursor.offset : 0;
 
-        const response = await fetch(`/api/local-gallery?offset=${offset}&limit=${PAGE_SIZE_ART}`, {
-          cache: 'no-store',
-        });
+        const response = await fetch('/assets/local-gallery/manifest.json', { cache: 'no-store' });
         const payload = await response.json().catch(() => null);
 
         if (!response.ok) {
           throw new Error(payload?.error || 'Could not fetch local gallery.');
         }
 
-        const items = (Array.isArray(payload?.items) ? payload.items : []).map((item, index) => ({
-          ...item,
-          id: item?.id || `local-gallery-${offset + index}`,
+        const fileNames = Array.isArray(payload?.files) ? payload.files : [];
+
+        const slice = fileNames.slice(offset, offset + PAGE_SIZE_ART);
+        const items = slice.map((fileName, index) => ({
+          id: `local-gallery-${offset + index}-${fileName}`,
           source: targetCategory,
-          tag: item?.tag || `- - ${CATEGORY_LABELS[targetCategory]}`,
+          title: 'Local photo',
+          detail: '',
+          tag: `- - ${CATEGORY_LABELS[targetCategory]}`,
+          imageUrl: `/assets/local-gallery/${encodeURIComponent(fileName)}`,
+          webUrl: null,
         }));
 
-        const nextOffset =
-          Number.isFinite(payload?.nextOffset) && payload.nextOffset >= 0
-            ? payload.nextOffset
-            : offset + PAGE_SIZE_ART;
+        const nextOffset = offset + slice.length >= fileNames.length ? 0 : offset + slice.length;
 
         return {
           items,
