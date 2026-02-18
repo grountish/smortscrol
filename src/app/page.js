@@ -41,6 +41,7 @@ const CATEGORY_LABELS = {
   seen: 'Seen',
   art: 'Art',
   'tumblr-gallery': 'Tumblr',
+  'local-gallery': 'Gallery',
   'art-history': 'Art History',
   'music-history': 'Music History',
   philosophy: 'Philosophy',
@@ -94,11 +95,14 @@ const BOTTOM_BAR_SHOW_SCROLL_PX = 28;
 const BOTTOM_BAR_HIDE_SCROLL_PX = 40;
 const BOTTOM_BAR_SCROLL_DELTA_MIN = 2;
 const TUMBLR_SOURCE_KEY = 'tumblr-gallery';
+const LOCAL_GALLERY_SOURCE_KEY = 'local-gallery';
 const TUMBLR_INSERT_EVERY = 10;
+const LOCAL_GALLERY_INSERT_EVERY = 20;
 const ART_QUERY = 'painting';
 const FEED_SOURCES = [
   'art',
   'tumblr-gallery',
+  'local-gallery',
   'art-history',
   'music-history',
   'philosophy',
@@ -112,6 +116,19 @@ const FEED_SOURCES = [
   'anthropology-facts',
 ];
 const FEED_SOURCE_BATCH = 3;
+const READ_TIME_SOURCES = new Set([
+  'art-history',
+  'music-history',
+  'philosophy',
+  'science',
+  'computer-science',
+  'cinema',
+  'cinema-history',
+  'feminism',
+  'history-facts',
+  'neurobiology',
+  'anthropology-facts',
+]);
 const PHILOSOPHER_NAMES = [
   'Socrates',
   'Plato',
@@ -262,7 +279,7 @@ function estimateReadingLines(item) {
 }
 
 function estimateReadMinutes(item) {
-  const text = [item?.title, item?.detailFull, item?.detail]
+  const text = [item?.title, item?.detailFull || item?.detail]
     .filter((part) => typeof part === 'string' && part.trim())
     .join(' ')
     .trim();
@@ -273,6 +290,19 @@ function estimateReadMinutes(item) {
 
   const words = text.split(/\s+/).filter(Boolean).length;
   return Math.max(1, Math.ceil(words / AVERAGE_READING_WPM));
+}
+
+function shouldShowReadMinutes(item, isExpanded, isLoadingFull) {
+  const source = getItemSource(item);
+  if (!READ_TIME_SOURCES.has(source)) {
+    return false;
+  }
+
+  if (!isExpanded || isLoadingFull) {
+    return false;
+  }
+
+  return true;
 }
 
 function getParagraphs(text) {
@@ -387,25 +417,40 @@ function countCadenceSlots(existingCount, batchSize, interval) {
   return slots;
 }
 
-function arrangeFeedWithTumblrCadence(items, existingCount) {
+function arrangeFeedWithCadence(items, existingCount) {
   if (!items.length) {
     return [];
   }
 
   const tumblrPool = [];
+  const localGalleryPool = [];
   const nonTumblrPool = [];
 
   items.forEach((item) => {
-    if (getItemSource(item) === TUMBLR_SOURCE_KEY) {
+    const source = getItemSource(item);
+
+    if (source === TUMBLR_SOURCE_KEY) {
       tumblrPool.push(item);
       return;
     }
+
+    if (source === LOCAL_GALLERY_SOURCE_KEY) {
+      localGalleryPool.push(item);
+      return;
+    }
+
     nonTumblrPool.push(item);
   });
 
   const arranged = [];
   for (let index = 1; index <= items.length; index += 1) {
+    const shouldUseLocalGallery = (existingCount + index) % LOCAL_GALLERY_INSERT_EVERY === 0;
     const shouldUseTumblr = (existingCount + index) % TUMBLR_INSERT_EVERY === 0;
+
+    if (shouldUseLocalGallery && localGalleryPool.length) {
+      arranged.push(localGalleryPool.shift());
+      continue;
+    }
 
     if (shouldUseTumblr && tumblrPool.length) {
       arranged.push(tumblrPool.shift());
@@ -419,6 +464,11 @@ function arrangeFeedWithTumblrCadence(items, existingCount) {
 
     if (tumblrPool.length) {
       arranged.push(tumblrPool.shift());
+      continue;
+    }
+
+    if (localGalleryPool.length) {
+      arranged.push(localGalleryPool.shift());
     }
   }
 
@@ -968,6 +1018,40 @@ export default function HomePage() {
         };
       }
 
+      if (targetCategory === 'local-gallery') {
+        const localCursor = cursorByCategory[targetCategory] || { offset: 0 };
+        const offset =
+          Number.isFinite(localCursor?.offset) && localCursor.offset >= 0 ? localCursor.offset : 0;
+
+        const response = await fetch(`/api/local-gallery?offset=${offset}&limit=${PAGE_SIZE_ART}`, {
+          cache: 'no-store',
+        });
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error(payload?.error || 'Could not fetch local gallery.');
+        }
+
+        const items = (Array.isArray(payload?.items) ? payload.items : []).map((item, index) => ({
+          ...item,
+          id: item?.id || `local-gallery-${offset + index}`,
+          source: targetCategory,
+          tag: item?.tag || `- - ${CATEGORY_LABELS[targetCategory]}`,
+        }));
+
+        const nextOffset =
+          Number.isFinite(payload?.nextOffset) && payload.nextOffset >= 0
+            ? payload.nextOffset
+            : offset + PAGE_SIZE_ART;
+
+        return {
+          items,
+          cursor: {
+            offset: nextOffset,
+          },
+        };
+      }
+
       if (targetCategory === 'philosophy') {
         const baseOrder = PHILOSOPHER_NAMES;
         const previousCursor = cursorByCategory[targetCategory] || {};
@@ -1246,7 +1330,55 @@ export default function HomePage() {
             }
           }
 
-          itemsToAdd = arrangeFeedWithTumblrCadence(selectedFeedItems, existingFeedCount);
+          const requiredLocalSlots = countCadenceSlots(
+            existingFeedCount,
+            selectedFeedItems.length,
+            LOCAL_GALLERY_INSERT_EVERY,
+          );
+          const selectedLocalCount = selectedFeedItems.filter(
+            (item) => getItemSource(item) === LOCAL_GALLERY_SOURCE_KEY,
+          ).length;
+
+          if (requiredLocalSlots > selectedLocalCount) {
+            try {
+              const localBatch = await fetchBatch(LOCAL_GALLERY_SOURCE_KEY);
+              if (localBatch?.cursor) {
+                setCursorByCategory((prev) => ({
+                  ...prev,
+                  [LOCAL_GALLERY_SOURCE_KEY]: localBatch.cursor,
+                }));
+              }
+
+              const existingIds = new Set(selectedFeedItems.map((item) => item.id));
+              const shortage = requiredLocalSlots - selectedLocalCount;
+              const extraLocalItems = (Array.isArray(localBatch?.items) ? localBatch.items : [])
+                .filter((item) => item?.id && !existingIds.has(item.id))
+                .slice(0, shortage);
+
+              if (extraLocalItems.length) {
+                const localItems = selectedFeedItems.filter(
+                  (item) => getItemSource(item) === LOCAL_GALLERY_SOURCE_KEY,
+                );
+                const nonLocalItems = selectedFeedItems.filter(
+                  (item) => getItemSource(item) !== LOCAL_GALLERY_SOURCE_KEY,
+                );
+                const nonLocalKeepCount = Math.max(
+                  0,
+                  nonLocalItems.length - extraLocalItems.length,
+                );
+
+                selectedFeedItems = [
+                  ...localItems,
+                  ...extraLocalItems,
+                  ...nonLocalItems.slice(0, nonLocalKeepCount),
+                ].slice(0, selectedFeedItems.length);
+              }
+            } catch {
+              // Ignore supplemental local gallery fetch failures; feed still loads.
+            }
+          }
+
+          itemsToAdd = arrangeFeedWithCadence(selectedFeedItems, existingFeedCount);
         }
 
         setItemsByCategory((prev) => {
@@ -2550,7 +2682,8 @@ export default function HomePage() {
           const isExpanded = Boolean(expandedIds[item.id]);
           const isLoadingFull = Boolean(loadingFullText[item.id]);
           const fullText = item.detailFull || item.detail;
-          const readMinutes = estimateReadMinutes(item);
+          const showReadMinutes = shouldShowReadMinutes(item, isExpanded, isLoadingFull);
+          const readMinutes = showReadMinutes ? estimateReadMinutes(item) : null;
           const displayText = isExpanded
             ? isLoadingFull
               ? 'Loading full text...'
@@ -2600,7 +2733,7 @@ export default function HomePage() {
               <div className="cardMeta">
                 <div className="cardMetaLead">
                   <p className="cardTag">{item.tag}</p>
-                  <p className="cardReadTime">{readMinutes} min read</p>
+                  {showReadMinutes ? <p className="cardReadTime">{readMinutes} min read</p> : null}
                 </div>
                 <div className="cardActions">
                   {category === 'feed' ? (
