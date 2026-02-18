@@ -41,7 +41,7 @@ const CATEGORY_LABELS = {
   seen: 'Seen',
   art: 'Art',
   'tumblr-gallery': 'Tumblr',
-  'local-gallery': 'Gallery',
+  'local-gallery': '*',
   'art-history': 'Art History',
   'music-history': 'Music History',
   philosophy: 'Philosophy',
@@ -1036,7 +1036,7 @@ export default function HomePage() {
         const items = slice.map((fileName, index) => ({
           id: `local-gallery-${offset + index}-${fileName}`,
           source: targetCategory,
-          title: 'Local photo',
+          title: '_',
           detail: '',
           tag: `- - ${CATEGORY_LABELS[targetCategory]}`,
           imageUrl: `/assets/local-gallery/${encodeURIComponent(fileName)}`,
