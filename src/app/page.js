@@ -40,6 +40,7 @@ const CATEGORY_LABELS = {
   fav: 'Fav',
   seen: 'Seen',
   art: 'Art',
+  'tumblr-gallery': 'Tumblr',
   'art-history': 'Art History',
   'music-history': 'Music History',
   philosophy: 'Philosophy',
@@ -92,9 +93,12 @@ const MINDFUL_PASSIVE_BLOCK_AFTER_FAST_SCROLL_MS = 20000;
 const BOTTOM_BAR_SHOW_SCROLL_PX = 28;
 const BOTTOM_BAR_HIDE_SCROLL_PX = 40;
 const BOTTOM_BAR_SCROLL_DELTA_MIN = 2;
+const TUMBLR_SOURCE_KEY = 'tumblr-gallery';
+const TUMBLR_INSERT_EVERY = 10;
 const ART_QUERY = 'painting';
 const FEED_SOURCES = [
   'art',
+  'tumblr-gallery',
   'art-history',
   'music-history',
   'philosophy',
@@ -371,6 +375,54 @@ function pickBalancedFeedItems(items, maxItems) {
   }
 
   return picked;
+}
+
+function countCadenceSlots(existingCount, batchSize, interval) {
+  let slots = 0;
+  for (let index = 1; index <= batchSize; index += 1) {
+    if ((existingCount + index) % interval === 0) {
+      slots += 1;
+    }
+  }
+  return slots;
+}
+
+function arrangeFeedWithTumblrCadence(items, existingCount) {
+  if (!items.length) {
+    return [];
+  }
+
+  const tumblrPool = [];
+  const nonTumblrPool = [];
+
+  items.forEach((item) => {
+    if (getItemSource(item) === TUMBLR_SOURCE_KEY) {
+      tumblrPool.push(item);
+      return;
+    }
+    nonTumblrPool.push(item);
+  });
+
+  const arranged = [];
+  for (let index = 1; index <= items.length; index += 1) {
+    const shouldUseTumblr = (existingCount + index) % TUMBLR_INSERT_EVERY === 0;
+
+    if (shouldUseTumblr && tumblrPool.length) {
+      arranged.push(tumblrPool.shift());
+      continue;
+    }
+
+    if (nonTumblrPool.length) {
+      arranged.push(nonTumblrPool.shift());
+      continue;
+    }
+
+    if (tumblrPool.length) {
+      arranged.push(tumblrPool.shift());
+    }
+  }
+
+  return arranged;
 }
 
 function getVoiceColor(voiceIndex, totalVoices) {
@@ -879,6 +931,43 @@ export default function HomePage() {
         };
       }
 
+      if (targetCategory === 'tumblr-gallery') {
+        const tumblrCursor = cursorByCategory[targetCategory] || { offset: 0 };
+        const offset =
+          Number.isFinite(tumblrCursor?.offset) && tumblrCursor.offset >= 0
+            ? tumblrCursor.offset
+            : 0;
+
+        const response = await fetch(
+          `/api/tumblr-shared-gallery?offset=${offset}&limit=${PAGE_SIZE_ART}`,
+          { cache: 'no-store' },
+        );
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error(payload?.error || 'Could not fetch Tumblr gallery.');
+        }
+
+        const items = (Array.isArray(payload?.items) ? payload.items : []).map((item, index) => ({
+          ...item,
+          id: item?.id || `tumblr-gallery-${offset + index}`,
+          source: targetCategory,
+          tag: item?.tag || `- - ${CATEGORY_LABELS[targetCategory]}`,
+        }));
+
+        const nextOffset =
+          Number.isFinite(payload?.nextOffset) && payload.nextOffset >= 0
+            ? payload.nextOffset
+            : offset + PAGE_SIZE_ART;
+
+        return {
+          items,
+          cursor: {
+            offset: nextOffset,
+          },
+        };
+      }
+
       if (targetCategory === 'philosophy') {
         const baseOrder = PHILOSOPHER_NAMES;
         const previousCursor = cursorByCategory[targetCategory] || {};
@@ -1101,10 +1190,64 @@ export default function HomePage() {
         ]);
         const unseenItems = nextItems.filter((item) => !previouslySeenIds.has(item.id));
         const candidateItems = unseenItems.length ? unseenItems : nextItems;
-        const itemsToAdd =
-          targetCategory === 'feed'
-            ? pickBalancedFeedItems(candidateItems, LOAD_MORE_BATCH_MAX)
-            : candidateItems.slice(0, LOAD_MORE_BATCH_MAX);
+        let itemsToAdd = candidateItems.slice(0, LOAD_MORE_BATCH_MAX);
+
+        if (targetCategory === 'feed') {
+          const existingFeedCount = (itemsByCategory.feed || []).filter(
+            (item) => !seenIdsRef.current.has(item.id),
+          ).length;
+          let selectedFeedItems = pickBalancedFeedItems(candidateItems, LOAD_MORE_BATCH_MAX);
+
+          const requiredTumblrSlots = countCadenceSlots(
+            existingFeedCount,
+            selectedFeedItems.length,
+            TUMBLR_INSERT_EVERY,
+          );
+          const selectedTumblrCount = selectedFeedItems.filter(
+            (item) => getItemSource(item) === TUMBLR_SOURCE_KEY,
+          ).length;
+
+          if (requiredTumblrSlots > selectedTumblrCount) {
+            try {
+              const tumblrBatch = await fetchBatch(TUMBLR_SOURCE_KEY);
+              if (tumblrBatch?.cursor) {
+                setCursorByCategory((prev) => ({
+                  ...prev,
+                  [TUMBLR_SOURCE_KEY]: tumblrBatch.cursor,
+                }));
+              }
+
+              const existingIds = new Set(selectedFeedItems.map((item) => item.id));
+              const shortage = requiredTumblrSlots - selectedTumblrCount;
+              const extraTumblrItems = (Array.isArray(tumblrBatch?.items) ? tumblrBatch.items : [])
+                .filter((item) => item?.id && !existingIds.has(item.id))
+                .slice(0, shortage);
+
+              if (extraTumblrItems.length) {
+                const tumblrItems = selectedFeedItems.filter(
+                  (item) => getItemSource(item) === TUMBLR_SOURCE_KEY,
+                );
+                const nonTumblrItems = selectedFeedItems.filter(
+                  (item) => getItemSource(item) !== TUMBLR_SOURCE_KEY,
+                );
+                const nonTumblrKeepCount = Math.max(
+                  0,
+                  nonTumblrItems.length - extraTumblrItems.length,
+                );
+
+                selectedFeedItems = [
+                  ...tumblrItems,
+                  ...extraTumblrItems,
+                  ...nonTumblrItems.slice(0, nonTumblrKeepCount),
+                ].slice(0, selectedFeedItems.length);
+              }
+            } catch {
+              // Ignore supplemental Tumblr fetch failures; feed still loads.
+            }
+          }
+
+          itemsToAdd = arrangeFeedWithTumblrCadence(selectedFeedItems, existingFeedCount);
+        }
 
         setItemsByCategory((prev) => {
           const merged = mergeItems(prev[targetCategory] || [], itemsToAdd);
@@ -1127,7 +1270,7 @@ export default function HomePage() {
         setLoadingByCategory((prev) => ({ ...prev, [targetCategory]: false }));
       }
     },
-    [fetchBatch, getNextFeedSources],
+    [fetchBatch, getNextFeedSources, itemsByCategory.feed],
   );
 
   useEffect(() => {
