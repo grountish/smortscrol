@@ -2296,7 +2296,7 @@ export default function HomePage() {
       const previous = activeVisibleTickRef.current || now;
       activeVisibleTickRef.current = now;
 
-      if (document.visibilityState !== 'visible' || showBreathOverlay) {
+      if (document.visibilityState !== 'visible' || showBreathOverlay || selectedTextItemId) {
         return;
       }
 
@@ -2320,7 +2320,7 @@ export default function HomePage() {
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [showBreathOverlay]);
+  }, [selectedTextItemId, showBreathOverlay]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
