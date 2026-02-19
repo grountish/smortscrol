@@ -40,7 +40,7 @@ const CATEGORY_LABELS = {
   fav: 'Fav',
   seen: 'Seen',
   art: 'Art',
-  'tumblr-gallery': 'Tumblr',
+  'tumblr-gallery': '✦',
   'local-gallery': '*',
   'art-history': 'Art History',
   'music-history': 'Music History',
@@ -75,6 +75,7 @@ const TEXT_SIZE_STORAGE_KEY = 'smortscroll:text-size';
 const MINDFUL_SCORE_STORAGE_KEY = 'smortscroll:mindful-score';
 const READING_GUIDE_STORAGE_KEY = 'smortscroll:reading-guide';
 const AUTO_SCROLL_STORAGE_KEY = 'smortscroll:auto-scroll';
+const TOPIC_PREFERENCES_STORAGE_KEY = 'smortscroll:topic-preferences';
 const AUTO_SCROLL_STEP_PX = 100;
 const AUTO_SCROLL_STEP_MS = 5500;
 const FALLBACK_IMAGE_URL = '/icons/icon-512.png';
@@ -96,10 +97,11 @@ const BOTTOM_BAR_HIDE_SCROLL_PX = 40;
 const BOTTOM_BAR_SCROLL_DELTA_MIN = 2;
 const TUMBLR_SOURCE_KEY = 'tumblr-gallery';
 const LOCAL_GALLERY_SOURCE_KEY = 'local-gallery';
+const CUSTOM_TOPIC_PREFIX = 'custom-topic:';
 const TUMBLR_INSERT_EVERY = 10;
 const LOCAL_GALLERY_INSERT_EVERY = 20;
 const ART_QUERY = 'painting';
-const FEED_SOURCES = [
+const DEFAULT_FEED_SOURCES = [
   'art',
   'tumblr-gallery',
   'local-gallery',
@@ -242,6 +244,39 @@ function shuffleArray(items) {
   return shuffled;
 }
 
+function normalizeTopicLabel(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function toTopicSlug(value) {
+  const normalized = normalizeTopicLabel(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return normalized || 'topic';
+}
+
+function createCustomTopicKey(label, takenKeys) {
+  const base = `${CUSTOM_TOPIC_PREFIX}${toTopicSlug(label)}`;
+  if (!takenKeys.has(base)) {
+    return base;
+  }
+
+  let suffix = 2;
+  while (takenKeys.has(`${base}-${suffix}`)) {
+    suffix += 1;
+  }
+
+  return `${base}-${suffix}`;
+}
+
+function isCustomTopicSource(sourceKey) {
+  return typeof sourceKey === 'string' && sourceKey.startsWith(CUSTOM_TOPIC_PREFIX);
+}
+
 function normalizeSeed(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
@@ -327,7 +362,7 @@ function estimateReadMinutes(item) {
 
 function shouldShowReadMinutes(item, isExpanded, isLoadingFull) {
   const source = getItemSource(item);
-  if (!READ_TIME_SOURCES.has(source)) {
+  if (!READ_TIME_SOURCES.has(source) && !item?.wikiTitle) {
     return false;
   }
 
@@ -397,7 +432,12 @@ function getItemSource(item) {
   }
 
   const id = item?.id || '';
-  return FEED_SOURCES.find((sourceKey) => id.startsWith(`${sourceKey}-`)) || 'unknown';
+  if (isCustomTopicSource(id)) {
+    const lastDashIndex = id.lastIndexOf('-');
+    return lastDashIndex > CUSTOM_TOPIC_PREFIX.length ? id.slice(0, lastDashIndex) : id;
+  }
+
+  return DEFAULT_FEED_SOURCES.find((sourceKey) => id.startsWith(`${sourceKey}-`)) || 'unknown';
 }
 
 function pickBalancedFeedItems(items, maxItems) {
@@ -532,6 +572,9 @@ export default function HomePage() {
   const [favoriteItems, setFavoriteItems] = useState([]);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [isLargeText, setIsLargeText] = useState(false);
+  const [enabledSources, setEnabledSources] = useState(new Set(DEFAULT_FEED_SOURCES));
+  const [customTopics, setCustomTopics] = useState([]);
+  const [newTopicInput, setNewTopicInput] = useState('');
   const [speakingItemId, setSpeakingItemId] = useState(null);
   const [selectedTextItemId, setSelectedTextItemId] = useState(null);
   const [availableVoices, setAvailableVoices] = useState([]);
@@ -560,7 +603,7 @@ export default function HomePage() {
   const cardRefs = useRef({});
   const readContentRefs = useRef({});
   const loadMoreSentinelRef = useRef(null);
-  const feedSourceOrderRef = useRef(shuffleArray(FEED_SOURCES));
+  const feedSourceOrderRef = useRef([]);
   const feedSourceIndexRef = useRef(0);
   const lastScrollYRef = useRef(0);
   const lastScrollAtRef = useRef(0);
@@ -574,8 +617,6 @@ export default function HomePage() {
   const wakeLockRef = useRef(null);
   const breathAudioRef = useRef(null);
   const breathCircleRef = useRef(null);
-  const topMenuRef = useRef(null);
-  const bottomMenuRef = useRef(null);
 
   const items = useMemo(() => itemsByCategory[category] || [], [itemsByCategory, category]);
 
@@ -590,6 +631,103 @@ export default function HomePage() {
 
     return items.filter((item) => !hiddenIds.has(item.id) || favoriteIds.has(item.id));
   }, [category, items, hiddenIds, favoriteIds, seenItems, favoriteItems]);
+
+  const customTopicsByKey = useMemo(
+    () =>
+      new Map(
+        customTopics.map((topic) => [
+          topic.key,
+          {
+            ...topic,
+            label: normalizeTopicLabel(topic.label || topic.query),
+            query: normalizeTopicLabel(topic.query || topic.label),
+          },
+        ]),
+      ),
+    [customTopics],
+  );
+
+  const activeFeedSources = useMemo(() => {
+    const enabled = enabledSources instanceof Set ? enabledSources : new Set();
+    const activeDefault = DEFAULT_FEED_SOURCES.filter((sourceKey) => enabled.has(sourceKey));
+    const activeCustom = customTopics
+      .filter((topic) => enabled.has(topic.key))
+      .map((topic) => topic.key);
+
+    return [...activeDefault, ...activeCustom];
+  }, [customTopics, enabledSources]);
+
+  const topicOptions = useMemo(() => {
+    const defaults = DEFAULT_FEED_SOURCES.map((sourceKey) => ({
+      key: sourceKey,
+      label: CATEGORY_LABELS[sourceKey] || sourceKey,
+      isCustom: false,
+    }));
+
+    const custom = customTopics.map((topic) => ({
+      key: topic.key,
+      label: normalizeTopicLabel(topic.label || topic.query),
+      isCustom: true,
+    }));
+
+    return [...defaults, ...custom];
+  }, [customTopics]);
+
+  const toggleTopicSource = useCallback((sourceKey) => {
+    if (!sourceKey) {
+      return;
+    }
+
+    setEnabledSources((prev) => {
+      const next = new Set(prev);
+      if (next.has(sourceKey)) {
+        if (next.size <= 1) {
+          return prev;
+        }
+        next.delete(sourceKey);
+      } else {
+        next.add(sourceKey);
+      }
+      return next;
+    });
+  }, []);
+
+  const addCustomTopic = useCallback(() => {
+    const normalized = normalizeTopicLabel(newTopicInput);
+    if (!normalized) {
+      return;
+    }
+
+    const existingTopic = customTopics.find(
+      (topic) => normalizeTopicLabel(topic.query).toLowerCase() === normalized.toLowerCase(),
+    );
+
+    if (existingTopic) {
+      setEnabledSources((prev) => {
+        const next = new Set(prev);
+        next.add(existingTopic.key);
+        return next;
+      });
+      setNewTopicInput('');
+      return;
+    }
+
+    const takenKeys = new Set([...DEFAULT_FEED_SOURCES, ...customTopics.map((topic) => topic.key)]);
+    const key = createCustomTopicKey(normalized, takenKeys);
+    const nextTopic = {
+      key,
+      label: normalized,
+      query: normalized,
+    };
+
+    setCustomTopics((prev) => [...prev, nextTopic]);
+    setEnabledSources((prev) => {
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+    setNewTopicInput('');
+  }, [customTopics, newTopicInput]);
 
   const adjustMindfulScore = useCallback((delta) => {
     if (!Number.isFinite(delta) || delta === 0) {
@@ -1154,7 +1292,13 @@ export default function HomePage() {
         };
       }
 
-      if (WIKI_SEARCH[targetCategory]) {
+      if (WIKI_SEARCH[targetCategory] || customTopicsByKey.has(targetCategory)) {
+        const customTopic = customTopicsByKey.get(targetCategory);
+        const categoryLabel =
+          CATEGORY_LABELS[targetCategory] ||
+          customTopic?.label ||
+          normalizeTopicLabel(targetCategory);
+
         const fetchWikiSummaries = async (topic, offset) => {
           const searchResponse = await fetch(
             `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
@@ -1180,7 +1324,7 @@ export default function HomePage() {
               detail: sanitizeWikiText(item.extract),
               detailFull: null,
               wikiTitle: item.title,
-              tag: CATEGORY_LABELS[targetCategory],
+              tag: categoryLabel,
               webUrl: item.content_urls?.desktop?.page || null,
               imageUrl: item.originalimage?.source || item.thumbnail?.source || null,
             })),
@@ -1188,7 +1332,7 @@ export default function HomePage() {
           };
         };
 
-        const searchTopic = WIKI_SEARCH[targetCategory];
+        const searchTopic = customTopic?.query || WIKI_SEARCH[targetCategory];
         const wikiCursor = cursorByCategory[targetCategory] || {
           offset: Math.floor(Math.random() * (WIKI_RANDOM_START_MAX + 1)),
         };
@@ -1204,7 +1348,7 @@ export default function HomePage() {
         }
 
         if (!count) {
-          const fallbackTopic = `${CATEGORY_LABELS[targetCategory]} history`;
+          const fallbackTopic = `${categoryLabel} history`;
           const retryFallback = await fetchWikiSummaries(fallbackTopic, 0);
           items = retryFallback.items;
           count = retryFallback.count;
@@ -1219,31 +1363,36 @@ export default function HomePage() {
 
       return { items: [], cursor: cursorByCategory[targetCategory] };
     },
-    [cursorByCategory],
+    [cursorByCategory, customTopicsByKey],
   );
 
   const getNextFeedSources = useCallback(() => {
+    if (!activeFeedSources.length) {
+      return [];
+    }
+
     if (!feedSourceOrderRef.current.length) {
-      feedSourceOrderRef.current = shuffleArray(FEED_SOURCES);
+      feedSourceOrderRef.current = shuffleArray(activeFeedSources);
     }
 
     const order = feedSourceOrderRef.current;
     const start = feedSourceIndexRef.current;
     const batch = [];
+    const batchSize = Math.min(FEED_SOURCE_BATCH, order.length);
 
-    for (let index = 0; index < FEED_SOURCE_BATCH; index += 1) {
+    for (let index = 0; index < batchSize; index += 1) {
       batch.push(order[(start + index) % order.length]);
     }
 
-    feedSourceIndexRef.current = (start + FEED_SOURCE_BATCH) % order.length;
+    feedSourceIndexRef.current = (start + batchSize) % order.length;
 
     // When a full cycle completes, reshuffle to avoid repeating the same order.
     if (feedSourceIndexRef.current === 0) {
-      feedSourceOrderRef.current = shuffleArray(FEED_SOURCES);
+      feedSourceOrderRef.current = shuffleArray(activeFeedSources);
     }
 
     return batch;
-  }, []);
+  }, [activeFeedSources]);
 
   const loadMore = useCallback(
     async (targetCategory) => {
@@ -1259,6 +1408,10 @@ export default function HomePage() {
         let nextItems = [];
 
         if (targetCategory === 'feed') {
+          if (!activeFeedSources.length) {
+            throw new Error('Enable at least one topic to load your feed.');
+          }
+
           const collectedBatches = [];
           const cursorUpdates = [];
           let attempts = 0;
@@ -1266,9 +1419,13 @@ export default function HomePage() {
           // Pull multiple batches until we have variety and a reasonable number of items.
           while (
             (collectedBatches.length < 2 || nextItems.length < PAGE_SIZE) &&
-            attempts < FEED_SOURCES.length * 2
+            attempts < activeFeedSources.length * 2
           ) {
             const sourceBatch = getNextFeedSources();
+            if (!sourceBatch.length) {
+              break;
+            }
+
             const settled = await Promise.allSettled(
               sourceBatch.map((source) => fetchBatch(source)),
             );
@@ -1348,7 +1505,7 @@ export default function HomePage() {
             (item) => getItemSource(item) === TUMBLR_SOURCE_KEY,
           ).length;
 
-          if (requiredTumblrSlots > selectedTumblrCount) {
+          if (enabledSources.has(TUMBLR_SOURCE_KEY) && requiredTumblrSlots > selectedTumblrCount) {
             try {
               const tumblrBatch = await fetchBatch(TUMBLR_SOURCE_KEY);
               if (tumblrBatch?.cursor) {
@@ -1396,7 +1553,10 @@ export default function HomePage() {
             (item) => getItemSource(item) === LOCAL_GALLERY_SOURCE_KEY,
           ).length;
 
-          if (requiredLocalSlots > selectedLocalCount) {
+          if (
+            enabledSources.has(LOCAL_GALLERY_SOURCE_KEY) &&
+            requiredLocalSlots > selectedLocalCount
+          ) {
             try {
               const localBatch = await fetchBatch(LOCAL_GALLERY_SOURCE_KEY);
               if (localBatch?.cursor) {
@@ -1459,7 +1619,13 @@ export default function HomePage() {
         setLoadingByCategory((prev) => ({ ...prev, [targetCategory]: false }));
       }
     },
-    [fetchBatch, getNextFeedSources, itemsByCategory.feed],
+    [
+      activeFeedSources.length,
+      enabledSources,
+      fetchBatch,
+      getNextFeedSources,
+      itemsByCategory.feed,
+    ],
   );
 
   useEffect(() => {
@@ -2046,29 +2212,15 @@ export default function HomePage() {
       return;
     }
 
-    const onPointerDown = (event) => {
-      const target = event.target;
-      if (
-        (topMenuRef.current && topMenuRef.current.contains(target)) ||
-        (bottomMenuRef.current && bottomMenuRef.current.contains(target))
-      ) {
-        return;
-      }
-
-      setOpenMenuSlot(null);
-    };
-
     const onKeyDown = (event) => {
       if (event.key === 'Escape') {
         setOpenMenuSlot(null);
       }
     };
 
-    window.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('keydown', onKeyDown);
 
     return () => {
-      window.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [openMenuSlot]);
@@ -2258,6 +2410,88 @@ export default function HomePage() {
       // Ignore storage write failures.
     }
   }, [cursorByCategory]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      const rawValue = window.localStorage.getItem(TOPIC_PREFERENCES_STORAGE_KEY);
+      if (!rawValue) {
+        return;
+      }
+
+      const parsed = JSON.parse(rawValue);
+      const parsedTopicsRaw = Array.isArray(parsed?.customTopics) ? parsed.customTopics : [];
+      const takenKeys = new Set(DEFAULT_FEED_SOURCES);
+      const parsedTopics = parsedTopicsRaw
+        .map((topic) => {
+          const query = normalizeTopicLabel(topic?.query || topic?.label);
+          if (!query) {
+            return null;
+          }
+
+          let key =
+            typeof topic?.key === 'string' && isCustomTopicSource(topic.key)
+              ? topic.key
+              : createCustomTopicKey(query, takenKeys);
+
+          if (takenKeys.has(key)) {
+            key = createCustomTopicKey(query, takenKeys);
+          }
+
+          takenKeys.add(key);
+          return {
+            key,
+            label: normalizeTopicLabel(topic?.label || query),
+            query,
+          };
+        })
+        .filter(Boolean);
+
+      setCustomTopics(parsedTopics);
+
+      const validSourceKeys = new Set([
+        ...DEFAULT_FEED_SOURCES,
+        ...parsedTopics.map((topic) => topic.key),
+      ]);
+      const parsedEnabled = Array.isArray(parsed?.enabledSources)
+        ? parsed.enabledSources.filter((key) => validSourceKeys.has(key))
+        : [];
+
+      if (parsedEnabled.length) {
+        setEnabledSources(new Set(parsedEnabled));
+      } else {
+        setEnabledSources(new Set(DEFAULT_FEED_SOURCES));
+      }
+    } catch {
+      // Ignore invalid stored topic preferences.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(
+        TOPIC_PREFERENCES_STORAGE_KEY,
+        JSON.stringify({
+          enabledSources: Array.from(enabledSources),
+          customTopics,
+        }),
+      );
+    } catch {
+      // Ignore storage write failures.
+    }
+  }, [customTopics, enabledSources]);
+
+  useEffect(() => {
+    feedSourceOrderRef.current = shuffleArray(activeFeedSources);
+    feedSourceIndexRef.current = 0;
+  }, [activeFeedSources]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -2599,6 +2833,73 @@ export default function HomePage() {
     };
   }, [category, errorByCategory.feed, loadMore, loadingByCategory.feed]);
 
+  const handleNewTopicKeyDown = useCallback(
+    (event) => {
+      if (event.key !== 'Enter') {
+        return;
+      }
+
+      event.preventDefault();
+      addCustomTopic();
+    },
+    [addCustomTopic],
+  );
+
+  const renderTopicControls = useCallback(
+    (slot) => (
+      <>
+        <p className="dropdownLabel topicSectionLabel">Topics</p>
+        <div className="topicToggleList" aria-label="Feed topics">
+          {topicOptions.map((topic) => {
+            const isActive = enabledSources.has(topic.key);
+            return (
+              <button
+                key={`${slot}-${topic.key}`}
+                type="button"
+                className={`topicToggleButton${isActive ? ' topicToggleButtonActive' : ''}`}
+                onClick={() => toggleTopicSource(topic.key)}
+                aria-pressed={isActive}
+                title={topic.label}>
+                {topic.isCustom ? `+ ${topic.label}` : topic.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <label className="dropdownLabel topicSectionLabel" htmlFor={`topic-input-${slot}`}>
+          Add topic
+        </label>
+        <div className="topicInputRow">
+          <input
+            id={`topic-input-${slot}`}
+            className="dropdownSelect topicInput"
+            type="text"
+            value={newTopicInput}
+            onChange={(event) => setNewTopicInput(event.target.value)}
+            onKeyDown={handleNewTopicKeyDown}
+            placeholder="e.g. stoicism"
+            aria-label="Add topic"
+          />
+          <button
+            className="topicAddButton"
+            type="button"
+            onClick={addCustomTopic}
+            aria-label="Add topic">
+            Add
+          </button>
+        </div>
+      </>
+    ),
+    [
+      addCustomTopic,
+      enabledSources,
+      handleNewTopicKeyDown,
+      newTopicInput,
+      topicOptions,
+      toggleTopicSource,
+    ],
+  );
+
   return (
     <main className={`page${isDarkMode ? ' pageDark' : ''}${isLargeText ? ' pageLargeText' : ''}`}>
       <header className="headerWrap">
@@ -2648,12 +2949,12 @@ export default function HomePage() {
             <span className="topDivider" aria-hidden="true" />
 
             <div className="topControls">
-              <div className="menuWrap" ref={topMenuRef}>
+              <div className="menuWrap">
                 <button
                   className="installButton menuTrigger"
                   type="button"
                   onClick={() => toggleSettingsMenu('top')}
-                  aria-haspopup="menu"
+                  aria-haspopup="dialog"
                   aria-expanded={openMenuSlot === 'top'}
                   aria-label={
                     selectedVoice
@@ -2664,64 +2965,6 @@ export default function HomePage() {
                   <Settings2 size={CONTROL_ICON_SIZE} aria-hidden="true" />
                   <ChevronDown size={12} aria-hidden="true" className="menuChevron" />
                 </button>
-
-                {openMenuSlot === 'top' ? (
-                  <div className="dropdownMenu" role="menu" aria-label="Voice and settings">
-                    <label className="dropdownLabel" htmlFor="voice-select-top">
-                      Voice
-                    </label>
-                    <select
-                      id="voice-select-top"
-                      className="dropdownSelect"
-                      value={selectedVoiceUri || ''}
-                      onChange={(event) => {
-                        selectVoice(event.target.value);
-                        setOpenMenuSlot(null);
-                      }}
-                      disabled={!availableVoices.length}>
-                      {!availableVoices.length ? (
-                        <option value="">No voices available</option>
-                      ) : (
-                        availableVoices.map((voice) => (
-                          <option key={voice.voiceURI} value={voice.voiceURI}>
-                            {voice.name}
-                          </option>
-                        ))
-                      )}
-                    </select>
-                    <div className="menuIconRow" aria-label="Upcoming tools">
-                      <button
-                        className={`menuIconButton${showReadingGuide ? ' menuIconButtonActive' : ''}`}
-                        type="button"
-                        onClick={toggleReadingGuide}
-                        aria-pressed={showReadingGuide}
-                        aria-label={
-                          showReadingGuide ? 'Disable reading line' : 'Enable reading line'
-                        }
-                        title={showReadingGuide ? 'Disable reading line' : 'Enable reading line'}>
-                        <Minus size={14} aria-hidden="true" />
-                      </button>
-                      <button
-                        className={`menuIconButton${isAutoScrollEnabled ? ' menuIconButtonActive' : ''}`}
-                        type="button"
-                        onClick={toggleAutoScroll}
-                        aria-pressed={isAutoScrollEnabled}
-                        aria-label={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}
-                        title={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}>
-                        <ChevronsDown size={14} aria-hidden="true" />
-                      </button>
-                      <button
-                        className={`menuIconButton${showBreathOverlay ? ' menuIconButtonActive' : ''}`}
-                        type="button"
-                        onClick={openBreathOverlay}
-                        aria-pressed={showBreathOverlay}
-                        aria-label="Start breathing exercise"
-                        title="Start breathing exercise">
-                        <Leaf size={14} aria-hidden="true" />
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
               </div>
 
               <button
@@ -3049,6 +3292,73 @@ export default function HomePage() {
         </div>
       ) : null}
 
+      {openMenuSlot ? (
+        <div className="dialogBackdrop" role="presentation" onClick={() => setOpenMenuSlot(null)}>
+          <div
+            className="dialogCard settingsDialogCard"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-dialog-title"
+            onClick={(event) => event.stopPropagation()}>
+            <h3 id="settings-dialog-title">Voice and settings</h3>
+            <label className="dropdownLabel" htmlFor="voice-select-modal">
+              Voice
+            </label>
+            <select
+              id="voice-select-modal"
+              className="dropdownSelect"
+              value={selectedVoiceUri || ''}
+              onChange={(event) => {
+                selectVoice(event.target.value);
+              }}
+              disabled={!availableVoices.length}>
+              {!availableVoices.length ? (
+                <option value="">No voices available</option>
+              ) : (
+                availableVoices.map((voice) => (
+                  <option key={voice.voiceURI} value={voice.voiceURI}>
+                    {voice.name}
+                  </option>
+                ))
+              )}
+            </select>
+            <div className="menuIconRow" aria-label="Upcoming tools">
+              <button
+                className={`menuIconButton${showReadingGuide ? ' menuIconButtonActive' : ''}`}
+                type="button"
+                onClick={toggleReadingGuide}
+                aria-pressed={showReadingGuide}
+                aria-label={showReadingGuide ? 'Disable reading line' : 'Enable reading line'}
+                title={showReadingGuide ? 'Disable reading line' : 'Enable reading line'}>
+                <Minus size={14} aria-hidden="true" />
+              </button>
+              <button
+                className={`menuIconButton${isAutoScrollEnabled ? ' menuIconButtonActive' : ''}`}
+                type="button"
+                onClick={toggleAutoScroll}
+                aria-pressed={isAutoScrollEnabled}
+                aria-label={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}
+                title={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}>
+                <ChevronsDown size={14} aria-hidden="true" />
+              </button>
+              <button
+                className={`menuIconButton${showBreathOverlay ? ' menuIconButtonActive' : ''}`}
+                type="button"
+                onClick={openBreathOverlay}
+                aria-pressed={showBreathOverlay}
+                aria-label="Start breathing exercise"
+                title="Start breathing exercise">
+                <Leaf size={14} aria-hidden="true" />
+              </button>
+            </div>
+            {renderTopicControls(openMenuSlot)}
+            <button className="retryButton" type="button" onClick={() => setOpenMenuSlot(null)}>
+              Close
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {showBreathOverlay ? (
         <div
           className="breathOverlay"
@@ -3102,12 +3412,12 @@ export default function HomePage() {
             <span className="topDivider" aria-hidden="true" />
 
             <div className="topControls">
-              <div className="menuWrap" ref={bottomMenuRef}>
+              <div className="menuWrap">
                 <button
                   className="installButton menuTrigger"
                   type="button"
                   onClick={() => toggleSettingsMenu('bottom')}
-                  aria-haspopup="menu"
+                  aria-haspopup="dialog"
                   aria-expanded={openMenuSlot === 'bottom'}
                   aria-label={
                     selectedVoice
@@ -3118,67 +3428,6 @@ export default function HomePage() {
                   <Settings2 size={CONTROL_ICON_SIZE} aria-hidden="true" />
                   <ChevronDown size={12} aria-hidden="true" className="menuChevron" />
                 </button>
-
-                {openMenuSlot === 'bottom' ? (
-                  <div
-                    className="dropdownMenu dropdownMenuUp"
-                    role="menu"
-                    aria-label="Voice and settings">
-                    <label className="dropdownLabel" htmlFor="voice-select-bottom">
-                      Voice
-                    </label>
-                    <select
-                      id="voice-select-bottom"
-                      className="dropdownSelect"
-                      value={selectedVoiceUri || ''}
-                      onChange={(event) => {
-                        selectVoice(event.target.value);
-                        setOpenMenuSlot(null);
-                      }}
-                      disabled={!availableVoices.length}>
-                      {!availableVoices.length ? (
-                        <option value="">No voices available</option>
-                      ) : (
-                        availableVoices.map((voice) => (
-                          <option key={voice.voiceURI} value={voice.voiceURI}>
-                            {voice.name}
-                          </option>
-                        ))
-                      )}
-                    </select>
-                    <div className="menuIconRow" aria-label="Upcoming tools">
-                      <button
-                        className={`menuIconButton${showReadingGuide ? ' menuIconButtonActive' : ''}`}
-                        type="button"
-                        onClick={toggleReadingGuide}
-                        aria-pressed={showReadingGuide}
-                        aria-label={
-                          showReadingGuide ? 'Disable reading line' : 'Enable reading line'
-                        }
-                        title={showReadingGuide ? 'Disable reading line' : 'Enable reading line'}>
-                        <Minus size={14} aria-hidden="true" />
-                      </button>
-                      <button
-                        className={`menuIconButton${isAutoScrollEnabled ? ' menuIconButtonActive' : ''}`}
-                        type="button"
-                        onClick={toggleAutoScroll}
-                        aria-pressed={isAutoScrollEnabled}
-                        aria-label={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}
-                        title={isAutoScrollEnabled ? 'Stop auto scroll' : 'Start auto scroll'}>
-                        <ChevronsDown size={14} aria-hidden="true" />
-                      </button>
-                      <button
-                        className={`menuIconButton${showBreathOverlay ? ' menuIconButtonActive' : ''}`}
-                        type="button"
-                        onClick={openBreathOverlay}
-                        aria-pressed={showBreathOverlay}
-                        aria-label="Start breathing exercise"
-                        title="Start breathing exercise">
-                        <Leaf size={14} aria-hidden="true" />
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
               </div>
 
               <button

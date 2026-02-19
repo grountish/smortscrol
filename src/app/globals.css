@@ -284,12 +284,15 @@ body {
         top: calc(100% + 8px);
         right: 0;
         z-index: 950;
-        min-width: 220px;
-        max-width: min(280px, calc(100vw - 20px));
+        min-width: 260px;
+        max-width: min(360px, calc(100vw - 20px));
         border: 1px solid var(--line);
         background: var(--panel);
         border-radius: 12px;
         padding: 10px;
+        max-height: min(78dvh, 720px);
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
 }
 
 .dropdownMenuUp {
@@ -327,6 +330,57 @@ body {
         margin-top: 8px;
         display: flex;
         gap: 6px;
+}
+
+.topicSectionLabel {
+        margin-top: 10px;
+}
+
+.topicToggleList {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+}
+
+.topicToggleButton {
+        border: 1px solid var(--line);
+        background: var(--chip);
+        color: var(--muted);
+        border-radius: 999px;
+        padding: 4px 9px;
+        font-size: 11px;
+        line-height: 1.2;
+        max-width: 100%;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        cursor: pointer;
+}
+
+.topicToggleButtonActive {
+        border-color: var(--install-border);
+        background: var(--install-bg);
+        color: var(--install-ink);
+}
+
+.topicInputRow {
+        display: flex;
+        gap: 6px;
+}
+
+.topicInput {
+        flex: 1;
+}
+
+.topicAddButton {
+        border: 1px solid var(--line);
+        background: var(--chip);
+        color: var(--ink);
+        border-radius: 8px;
+        padding: 0 10px;
+        font-size: 12px;
+        font-weight: 700;
+        cursor: pointer;
 }
 
 .menuIconButton {
@@ -631,6 +685,14 @@ body {
         text-align: left;
 }
 
+.settingsDialogCard {
+        width: min(520px, 100%);
+}
+
+.settingsDialogCard .retryButton {
+        width: 100%;
+}
+
 .scoreInfoList {
         margin: 10px 0 0;
         padding-left: 18px;
@@ -794,9 +856,10 @@ body {
         margin-left: auto;
 }
 
-.bottomBar .dropdownMenu {
-        left: 0;
-        right: auto;
+.bottomBar .dropdownMenu,
+.bottomBar .dropdownMenuUp {
+        left: auto;
+        right: 0;
 }
 
 .pageDark .bottomBar {
@@ -821,12 +884,34 @@ body {
                 padding-inline: 16px;
         }
 
-        .dropdownMenu {
-                min-width: 180px;
-                max-width: calc(100vw - 16px);
+        .headerWrap .dropdownMenu,
+        .headerWrap .dropdownMenuUp {
+                position: fixed;
+                inset-inline: 12px;
+                top: max(10px, env(safe-area-inset-top));
+                bottom: calc(max(10px, env(safe-area-inset-bottom)) + 84px);
+                min-width: 0;
+                max-width: none;
+                width: auto;
+                max-height: none;
+                border-radius: 16px;
+                padding: 12px;
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
         }
 
         .dropdownSelect {
                 font-size: 16px;
+        }
+
+        .topicToggleButton {
+                font-size: 12px;
+                padding: 6px 10px;
+        }
+
+        .topicAddButton {
+                min-height: 40px;
+                padding-inline: 12px;
+                font-size: 13px;
         }
 }
