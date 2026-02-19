@@ -1036,9 +1036,9 @@ export default function HomePage() {
         const items = slice.map((fileName, index) => ({
           id: `local-gallery-${offset + index}-${fileName}`,
           source: targetCategory,
-          title: '_',
+          title: '',
           detail: '',
-          tag: `- - ${CATEGORY_LABELS[targetCategory]}`,
+          tag: ` ${CATEGORY_LABELS[targetCategory]}`,
           imageUrl: `/assets/local-gallery/${encodeURIComponent(fileName)}`,
           webUrl: null,
         }));
