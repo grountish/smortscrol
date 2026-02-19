@@ -242,6 +242,39 @@ function shuffleArray(items) {
   return shuffled;
 }
 
+function normalizeSeed(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  return numeric >>> 0;
+}
+
+function makeSeededRandom(seed) {
+  let state = normalizeSeed(seed) || 1;
+
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+function getShuffledIndices(length, seed) {
+  const indices = Array.from({ length }, (_, index) => index);
+  const random = makeSeededRandom(seed);
+
+  for (let index = indices.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    [indices[index], indices[swapIndex]] = [indices[swapIndex], indices[index]];
+  }
+
+  return indices;
+}
+
+function getNextSeed(seed) {
+  return (normalizeSeed(seed) * 1664525 + 1013904223) >>> 0;
+}
+
 function mergeItems(currentItems, nextItems) {
   if (!nextItems.length) {
     return currentItems;
@@ -1019,9 +1052,10 @@ export default function HomePage() {
       }
 
       if (targetCategory === 'local-gallery') {
-        const localCursor = cursorByCategory[targetCategory] || { offset: 0 };
+        const localCursor = cursorByCategory[targetCategory] || { offset: 0, seed: 0 };
         const offset =
           Number.isFinite(localCursor?.offset) && localCursor.offset >= 0 ? localCursor.offset : 0;
+        const initialSeed = normalizeSeed(localCursor?.seed) || normalizeSeed(Math.random() * 1e9);
 
         const response = await fetch('/assets/local-gallery/manifest.json', { cache: 'no-store' });
         const payload = await response.json().catch(() => null);
@@ -1032,9 +1066,23 @@ export default function HomePage() {
 
         const fileNames = Array.isArray(payload?.files) ? payload.files : [];
 
-        const slice = fileNames.slice(offset, offset + PAGE_SIZE_ART);
+        if (!fileNames.length) {
+          return {
+            items: [],
+            cursor: {
+              offset: 0,
+              seed: initialSeed,
+            },
+          };
+        }
+
+        const shuffledIndices = getShuffledIndices(fileNames.length, initialSeed);
+        const orderedFileNames = shuffledIndices.map((index) => fileNames[index]);
+        const safeOffset = offset < orderedFileNames.length ? offset : 0;
+
+        const slice = orderedFileNames.slice(safeOffset, safeOffset + PAGE_SIZE_ART);
         const items = slice.map((fileName, index) => ({
-          id: `local-gallery-${offset + index}-${fileName}`,
+          id: `local-gallery-${safeOffset + index}-${fileName}`,
           source: targetCategory,
           title: '',
           detail: '',
@@ -1043,12 +1091,19 @@ export default function HomePage() {
           webUrl: null,
         }));
 
-        const nextOffset = offset + slice.length >= fileNames.length ? 0 : offset + slice.length;
+        let nextOffset = safeOffset + slice.length;
+        let nextSeed = initialSeed;
+
+        if (nextOffset >= orderedFileNames.length) {
+          nextOffset = 0;
+          nextSeed = getNextSeed(initialSeed);
+        }
 
         return {
           items,
           cursor: {
             offset: nextOffset,
+            seed: nextSeed,
           },
         };
       }
@@ -2680,6 +2735,7 @@ export default function HomePage() {
         {filteredItems.map((item) => {
           const isFavorite = favoriteIds.has(item.id);
           const isSpeaking = speakingItemId === item.id;
+          const isWikipediaItem = Boolean(item.wikiTitle);
           const isExpanded = Boolean(expandedIds[item.id]);
           const isLoadingFull = Boolean(loadingFullText[item.id]);
           const fullText = item.detailFull || item.detail;
@@ -2763,32 +2819,36 @@ export default function HomePage() {
                       <Heart size={18} aria-hidden="true" />
                     )}
                   </button>
-                  <button
-                    className="favoriteButton"
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      toggleReadAloud(item);
-                    }}
-                    aria-label={
-                      isSpeaking ? `Stop reading ${item.title}` : `Read aloud ${item.title}`
-                    }>
-                    {isSpeaking ? (
-                      <Square size={18} aria-hidden="true" />
-                    ) : (
-                      <Volume2 size={18} aria-hidden="true" />
-                    )}
-                  </button>
-                  <button
-                    className="favoriteButton"
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      selectArticleText(item);
-                    }}
-                    aria-label={`Select text for ${item.title}`}>
-                    <Highlighter size={18} aria-hidden="true" />
-                  </button>
+                  {isWikipediaItem ? (
+                    <button
+                      className="favoriteButton"
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleReadAloud(item);
+                      }}
+                      aria-label={
+                        isSpeaking ? `Stop reading ${item.title}` : `Read aloud ${item.title}`
+                      }>
+                      {isSpeaking ? (
+                        <Square size={18} aria-hidden="true" />
+                      ) : (
+                        <Volume2 size={18} aria-hidden="true" />
+                      )}
+                    </button>
+                  ) : null}
+                  {isWikipediaItem ? (
+                    <button
+                      className="favoriteButton"
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        selectArticleText(item);
+                      }}
+                      aria-label={`Select text for ${item.title}`}>
+                      <Highlighter size={18} aria-hidden="true" />
+                    </button>
+                  ) : null}
                 </div>
               </div>
 
