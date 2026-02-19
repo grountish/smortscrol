@@ -533,6 +533,7 @@ export default function HomePage() {
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [isLargeText, setIsLargeText] = useState(false);
   const [speakingItemId, setSpeakingItemId] = useState(null);
+  const [selectedTextItemId, setSelectedTextItemId] = useState(null);
   const [availableVoices, setAvailableVoices] = useState([]);
   const [selectedVoiceUri, setSelectedVoiceUri] = useState(null);
   const [showBottomBar, setShowBottomBar] = useState(false);
@@ -2172,7 +2173,7 @@ export default function HomePage() {
         return;
       }
 
-      if (speakingItemIdRef.current) {
+      if (speakingItemIdRef.current || selectedTextItemId) {
         void requestWakeLock();
       }
     };
@@ -2181,16 +2182,16 @@ export default function HomePage() {
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [releaseWakeLock, requestWakeLock]);
+  }, [releaseWakeLock, requestWakeLock, selectedTextItemId]);
 
   useEffect(() => {
-    if (speakingItemId) {
+    if (speakingItemId || selectedTextItemId) {
       void requestWakeLock();
       return;
     }
 
     void releaseWakeLock();
-  }, [releaseWakeLock, requestWakeLock, speakingItemId]);
+  }, [releaseWakeLock, requestWakeLock, selectedTextItemId, speakingItemId]);
 
   const toggleAmbientSound = useCallback(async () => {
     if (typeof window === 'undefined') {
@@ -2419,6 +2420,12 @@ export default function HomePage() {
     }
   }, [filteredItems, speakingItemId, stopReadAloud]);
 
+  useEffect(() => {
+    if (selectedTextItemId && !filteredItems.some((item) => item.id === selectedTextItemId)) {
+      setSelectedTextItemId(null);
+    }
+  }, [filteredItems, selectedTextItemId]);
+
   const setCardRef = useCallback((id, node) => {
     if (!id) {
       return;
@@ -2465,8 +2472,33 @@ export default function HomePage() {
       range.selectNodeContents(node);
       selection.removeAllRanges();
       selection.addRange(range);
+      setSelectedTextItemId(item.id);
     });
   }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined' || typeof window === 'undefined' || !selectedTextItemId) {
+      return;
+    }
+
+    const handleSelectionChange = () => {
+      const selection = window.getSelection?.();
+      const hasSelection =
+        Boolean(selection) &&
+        selection.rangeCount > 0 &&
+        !selection.isCollapsed &&
+        Boolean(selection.toString().trim());
+
+      if (!hasSelection) {
+        setSelectedTextItemId(null);
+      }
+    };
+
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', handleSelectionChange);
+    };
+  }, [selectedTextItemId]);
 
   const handleImageLoadError = useCallback((event) => {
     const image = event.currentTarget;
