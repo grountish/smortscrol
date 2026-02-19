@@ -171,6 +171,14 @@ function extractPostImageUrls(post) {
   return Array.from(urls);
 }
 
+function normalizeForComparison(text) {
+  return String(text || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 export async function GET(request) {
   const accessToken = process.env.TUMBLR_ACCESS_TOKEN;
   const consumerKey = process.env.TUMBLR_CONSUMER_KEY;
@@ -246,12 +254,15 @@ export async function GET(request) {
 
     const title = post?.summary || post?.blog_name || 'Tumblr post';
     const detail = extractTextSnippet(post);
+    const normalizedTitle = normalizeForComparison(title);
+    const normalizedDetail = normalizeForComparison(detail);
+    const displayDetail = normalizedTitle && normalizedTitle === normalizedDetail ? '' : detail;
     const webUrl = post?.post_url || post?.short_url || null;
 
     return imageUrls.map((imageUrl, index) => ({
       id: `tumblr-gallery-${post?.id || 'post'}-${index}`,
       title,
-      detail,
+      detail: displayDetail,
       tag: '-',
       imageUrl,
       webUrl,
