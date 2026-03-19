@@ -179,6 +179,28 @@ function normalizeForComparison(text) {
     .toLowerCase();
 }
 
+function summarizeNonJsonResponse(rawText, fallbackMessage) {
+  const snippet = String(rawText || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 140);
+
+  return snippet ? `${fallbackMessage} ${snippet}` : fallbackMessage;
+}
+
+async function parseJsonResponse(response, fallbackMessage) {
+  const rawText = await response.text();
+  if (!rawText) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    throw new Error(summarizeNonJsonResponse(rawText, fallbackMessage));
+  }
+}
+
 export async function GET(request) {
   const accessToken = process.env.TUMBLR_ACCESS_TOKEN;
   const consumerKey = process.env.TUMBLR_CONSUMER_KEY;
@@ -236,12 +258,22 @@ export async function GET(request) {
     cache: 'no-store',
   });
 
-  const payload = await response.json().catch(() => null);
+  const payload = await parseJsonResponse(
+    response,
+    'Tumblr returned a non-JSON response.',
+  ).catch((error) => ({ error: error.message }));
 
   if (!response.ok) {
     const message =
-      payload?.meta?.msg || payload?.errors?.[0]?.detail || 'Could not fetch Tumblr dashboard.';
+      payload?.meta?.msg ||
+      payload?.errors?.[0]?.detail ||
+      payload?.error ||
+      'Could not fetch Tumblr dashboard.';
     return NextResponse.json({ error: message }, { status: response.status });
+  }
+
+  if (payload?.error) {
+    return NextResponse.json({ error: payload.error }, { status: 502 });
   }
 
   const posts = Array.isArray(payload?.response?.posts) ? payload.response.posts : [];

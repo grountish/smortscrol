@@ -72,8 +72,9 @@ const LOAD_MORE_BATCH_MAX = 7;
 const ART_CURATED_BATCH = 12;
 const CONTROL_ICON_SIZE = 16;
 const AVERAGE_READING_WPM = 220;
-const WIKI_PAGE_SIZE = 20;
+const WIKI_PAGE_SIZE = 6;
 const WIKI_RANDOM_START_MAX = 60;
+const WIKI_SUMMARY_BATCH_SIZE = 3;
 const SHORT_TEXT_LIMIT = 160;
 const HIDDEN_STORAGE_KEY = 'smortscroll:hidden-ids';
 const SEEN_ITEMS_STORAGE_KEY = 'smortscroll:seen-items';
@@ -131,7 +132,7 @@ const DEFAULT_FEED_SOURCES = [
   'neurobiology',
   'anthropology-facts',
 ];
-const FEED_SOURCE_BATCH = 3;
+const FEED_SOURCE_BATCH = 2;
 const READ_TIME_SOURCES = new Set([
   'art-history',
   'music-history',
@@ -192,7 +193,7 @@ const PHILOSOPHER_NAMES = [
   'Byung-Chul Han',
   'Slavoj Žižek',
 ];
-const PHILOSOPHER_BATCH_SIZE = 8;
+const PHILOSOPHER_BATCH_SIZE = 4;
 const WIKI_SEARCH = {
   'art-history':
     'art history OR art movement OR painter OR sculptor OR picasso OR manet OR monet OR vangogh OR "van gogh" OR michelangelo OR "da vinci" OR cezanne OR renoir OR "aristide maillol" OR "henrietta rae" OR "aristide maillol" OR "female painter" OR gentileschi OR "frida kahlo" OR "georgia o keeffe" OR "mary cassatt" OR "berthe morisot" OR "suzanne valadon" OR "tamara de lempicka" OR "leonor fini" OR "alice neel" OR "lynette yiadom"',
@@ -385,6 +386,45 @@ function shouldShowReadMinutes(item, isExpanded, isLoadingFull) {
   }
 
   return true;
+}
+
+function summarizeNonJsonResponse(rawText, fallbackMessage) {
+  const snippet = String(rawText || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 140);
+
+  return snippet ? `${fallbackMessage} ${snippet}` : fallbackMessage;
+}
+
+async function parseJsonResponse(response, fallbackMessage) {
+  const rawText = await response.text();
+  if (!rawText) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    throw new Error(summarizeNonJsonResponse(rawText, fallbackMessage));
+  }
+}
+
+async function mapInBatches(items, batchSize, mapper) {
+  const results = [];
+  const safeBatchSize = Math.max(1, batchSize);
+
+  for (let index = 0; index < items.length; index += safeBatchSize) {
+    const chunk = items.slice(index, index + safeBatchSize);
+    const mapped = await Promise.all(chunk.map(mapper));
+    results.push(...mapped);
+  }
+
+  return results;
+}
+
+function isWikiBackedSource(sourceKey) {
+  return sourceKey === 'philosophy' || Boolean(WIKI_SEARCH[sourceKey]) || isCustomTopicSource(sourceKey);
 }
 
 function getParagraphs(text) {
@@ -994,7 +1034,10 @@ export default function HomePage() {
         title,
       )}&origin=*`,
     );
-    const json = await response.json();
+    const json = await parseJsonResponse(
+      response,
+      'Wikipedia returned a non-JSON response while loading full text.',
+    );
     const pages = json?.query?.pages;
     const firstKey = pages ? Object.keys(pages)[0] : null;
     const page = firstKey ? pages[firstKey] : null;
@@ -1096,7 +1139,9 @@ export default function HomePage() {
             ...curatedHighlightRequests,
           ]);
           const highlightJson = await Promise.all(
-            highlightResponses.map((response) => response.json()),
+            highlightResponses.map((response) =>
+              parseJsonResponse(response, 'The Met returned a non-JSON search response.'),
+            ),
           );
 
           highlightJson.forEach((entry) => {
@@ -1111,7 +1156,10 @@ export default function HomePage() {
                 ART_QUERY,
               )}`,
             );
-            const searchJson = await search.json();
+            const searchJson = await parseJsonResponse(
+              search,
+              'The Met returned a non-JSON fallback search response.',
+            );
             if (Array.isArray(searchJson.objectIDs)) {
               searchJson.objectIDs.forEach((id) => idSet.add(id));
             }
@@ -1155,7 +1203,9 @@ export default function HomePage() {
             );
             const detailResponses = await Promise.all(detailRequests);
             const detailJson = await Promise.all(
-              detailResponses.map((response) => response.json()),
+              detailResponses.map((response) =>
+                parseJsonResponse(response, 'The Met returned a non-JSON object response.'),
+              ),
             );
 
             const categoryItems = detailJson
@@ -1210,7 +1260,10 @@ export default function HomePage() {
             )}&query[term][is_public_domain]=true&page=${page}&limit=${PAGE_SIZE_ART}&fields=id,title,artist_display,date_display,medium_display,image_id`,
           );
 
-          const json = await response.json();
+          const json = await parseJsonResponse(
+            response,
+            'The Art Institute of Chicago returned a non-JSON response.',
+          );
           const iiifBase = json?.config?.iiif_url || 'https://www.artic.edu/iiif/2';
           const currentPage = Number.isFinite(json?.pagination?.current_page)
             ? json.pagination.current_page
@@ -1296,7 +1349,10 @@ export default function HomePage() {
           `/api/tumblr-shared-gallery?offset=${offset}&limit=${PAGE_SIZE_ART}`,
           { cache: 'no-store' },
         );
-        const payload = await response.json().catch(() => null);
+        const payload = await parseJsonResponse(
+          response,
+          'The Tumblr gallery route returned a non-JSON response.',
+        ).catch((error) => ({ error: error.message }));
 
         if (!response.ok) {
           throw new Error(payload?.error || 'Could not fetch Tumblr gallery.');
@@ -1329,7 +1385,10 @@ export default function HomePage() {
         const initialSeed = normalizeSeed(localCursor?.seed) || normalizeSeed(Math.random() * 1e9);
 
         const response = await fetch('/assets/local-gallery/manifest.json', { cache: 'no-store' });
-        const payload = await response.json().catch(() => null);
+        const payload = await parseJsonResponse(
+          response,
+          'The local gallery manifest returned a non-JSON response.',
+        ).catch(() => null);
 
         if (!response.ok) {
           throw new Error(payload?.error || 'Could not fetch local gallery.');
@@ -1395,11 +1454,16 @@ export default function HomePage() {
           selectedNames.push(baseOrder[(initialIndex + index) % baseOrder.length]);
         }
 
-        const summaryRequests = selectedNames.map((name) =>
-          fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(name)}`),
+        const summaries = await mapInBatches(
+          selectedNames,
+          WIKI_SUMMARY_BATCH_SIZE,
+          async (name) => {
+            const response = await fetch(
+              `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(name)}`,
+            );
+            return parseJsonResponse(response, 'Wikipedia returned a non-JSON summary response.');
+          },
         );
-        const summaryResponses = await Promise.all(summaryRequests);
-        const summaries = await Promise.all(summaryResponses.map((response) => response.json()));
 
         const items = summaries
           .filter(
@@ -1437,16 +1501,24 @@ export default function HomePage() {
               topic,
             )}&format=json&srlimit=${WIKI_PAGE_SIZE}&sroffset=${offset}&origin=*`,
           );
-          const searchJson = await searchResponse.json();
+          const searchJson = await parseJsonResponse(
+            searchResponse,
+            'Wikipedia returned a non-JSON search response.',
+          );
           const titles = shuffleArray(
             (searchJson?.query?.search || []).map((result) => result.title),
           );
 
-          const summaryRequests = titles.map((title) =>
-            fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`),
+          const summaries = await mapInBatches(
+            titles,
+            WIKI_SUMMARY_BATCH_SIZE,
+            async (title) => {
+              const response = await fetch(
+                `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
+              );
+              return parseJsonResponse(response, 'Wikipedia returned a non-JSON summary response.');
+            },
           );
-          const summaryResponses = await Promise.all(summaryRequests);
-          const summaries = await Promise.all(summaryResponses.map((response) => response.json()));
 
           return {
             items: summaries.map((item) => ({
@@ -1511,12 +1583,27 @@ export default function HomePage() {
     const start = feedSourceIndexRef.current;
     const batch = [];
     const batchSize = Math.min(FEED_SOURCE_BATCH, order.length);
+    const nonWikiAvailable = order.some((sourceKey) => !isWikiBackedSource(sourceKey));
+    const maxWikiSources = nonWikiAvailable ? 1 : batchSize;
+    let wikiCount = 0;
+    let scanned = 0;
+    let cursor = start;
 
-    for (let index = 0; index < batchSize; index += 1) {
-      batch.push(order[(start + index) % order.length]);
+    while (batch.length < batchSize && scanned < order.length) {
+      const source = order[cursor];
+      const wikiBacked = isWikiBackedSource(source);
+
+      if (!wikiBacked || wikiCount < maxWikiSources) {
+        batch.push(source);
+        if (wikiBacked) {
+          wikiCount += 1;
+        }
+      }
+
+      cursor = (cursor + 1) % order.length;
+      scanned += 1;
     }
-
-    feedSourceIndexRef.current = (start + batchSize) % order.length;
+    feedSourceIndexRef.current = cursor;
 
     // When a full cycle completes, reshuffle to avoid repeating the same order.
     if (feedSourceIndexRef.current === 0) {
@@ -3429,7 +3516,11 @@ export default function HomePage() {
           <div className="stateCard">
             <div className="stateLoadingRow" role="status" aria-live="polite">
               <span className="loadingBookSpinner" aria-hidden="true">
-                <BookText size={18} />
+                <img
+                  className="loadingBookGif"
+                  src="/assets/book-animation.gif"
+                  alt=""
+                />
               </span>
               <div>
                 <p className="stateTitle">Loading more...</p>

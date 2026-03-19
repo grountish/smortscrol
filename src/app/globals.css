@@ -727,21 +727,16 @@ body[data-theme='paper'] {
         align-items: center;
         justify-content: center;
         border-radius: 10px;
-        border: 1px solid var(--line);
-        background: var(--panel);
-        color: var(--accent);
-        animation: sheetSpinner 1s linear infinite;
+        background: transparent;
         flex: 0 0 auto;
+        overflow: hidden;
 }
 
-@keyframes sheetSpinner {
-        from {
-                transform: rotate(0deg);
-        }
-
-        to {
-                transform: rotate(360deg);
-        }
+.loadingBookGif {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
 }
 
 .pageDark .stateTitle {
