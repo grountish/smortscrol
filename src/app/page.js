@@ -20,6 +20,7 @@ import {
   Sun,
   Type,
   Volume2,
+  X,
 } from 'lucide-react';
 import curatedArtTerms from '../data/art_highlights.json';
 
@@ -28,6 +29,16 @@ const CATEGORIES = [
   { key: 'fav', label: 'Fav' },
   { key: 'seen', label: 'Seen' },
 ];
+
+const THEME_MODE_LIGHT = 'light';
+const THEME_MODE_PAPER = 'paper';
+const THEME_MODE_DARK = 'dark';
+const THEME_MODES = [THEME_MODE_LIGHT, THEME_MODE_PAPER, THEME_MODE_DARK];
+const THEME_LABELS = {
+  [THEME_MODE_LIGHT]: 'Light',
+  [THEME_MODE_PAPER]: 'Paper',
+  [THEME_MODE_DARK]: 'Dark',
+};
 
 const TAB_ICONS = {
   feed: InfinityIcon,
@@ -76,6 +87,7 @@ const MINDFUL_SCORE_STORAGE_KEY = 'smortscroll:mindful-score';
 const READING_GUIDE_STORAGE_KEY = 'smortscroll:reading-guide';
 const AUTO_SCROLL_STORAGE_KEY = 'smortscroll:auto-scroll';
 const TOPIC_PREFERENCES_STORAGE_KEY = 'smortscroll:topic-preferences';
+const BREATH_BREAK_SKIP_SESSION_KEY = 'smortscroll:breath-break-skip-session';
 const AUTO_SCROLL_STEP_PX = 100;
 const AUTO_SCROLL_STEP_MS = 5500;
 const FALLBACK_IMAGE_URL = '/icons/icon-512.png';
@@ -89,9 +101,11 @@ const MINDFUL_SCORE_PENALTY_FAST = -2;
 const MINDFUL_SCORE_PENALTY_MEDIUM_DOWN = -2;
 const MINDFUL_SCORE_PENALTY_FAST_DOWN = -3;
 const MINDFUL_SCROLL_PENALTY_COOLDOWN_MS = 420;
-const MINDFUL_SCORE_PASSIVE_INTERVAL = 15000;
+const MINDFUL_SCORE_PASSIVE_INTERVAL = 20000;
 const MINDFUL_SCORE_PASSIVE_GAIN = 1;
 const MINDFUL_PASSIVE_BLOCK_AFTER_FAST_SCROLL_MS = 20000;
+const MINDFUL_VIEW_THRESHOLD = 0.6;
+const MINDFUL_SCORE_VIEW_GAIN_MAX = 4;
 const BOTTOM_BAR_SHOW_SCROLL_PX = 28;
 const BOTTOM_BAR_HIDE_SCROLL_PX = 40;
 const BOTTOM_BAR_SCROLL_DELTA_MIN = 2;
@@ -570,8 +584,9 @@ export default function HomePage() {
   const [seenItems, setSeenItems] = useState([]);
   const [favoriteIds, setFavoriteIds] = useState(new Set());
   const [favoriteItems, setFavoriteItems] = useState([]);
-  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [themeMode, setThemeMode] = useState(THEME_MODE_LIGHT);
   const [isLargeText, setIsLargeText] = useState(false);
+  const [hasExplicitThemeChoice, setHasExplicitThemeChoice] = useState(false);
   const [enabledSources, setEnabledSources] = useState(new Set(DEFAULT_FEED_SOURCES));
   const [customTopics, setCustomTopics] = useState([]);
   const [newTopicInput, setNewTopicInput] = useState('');
@@ -588,6 +603,8 @@ export default function HomePage() {
   const [showBreathOverlay, setShowBreathOverlay] = useState(false);
   const [isBreathSoundReady, setIsBreathSoundReady] = useState(false);
   const [showScoreInfo, setShowScoreInfo] = useState(false);
+  const [skipAutoBreathBreak, setSkipAutoBreathBreak] = useState(false);
+  const [breathOverlaySource, setBreathOverlaySource] = useState(null);
 
   const inFlightRef = useRef({});
   const seenIdsRef = useRef(new Set());
@@ -617,6 +634,7 @@ export default function HomePage() {
   const wakeLockRef = useRef(null);
   const breathAudioRef = useRef(null);
   const breathCircleRef = useRef(null);
+  const hasLoadedThemeRef = useRef(false);
 
   const items = useMemo(() => itemsByCategory[category] || [], [itemsByCategory, category]);
 
@@ -728,6 +746,40 @@ export default function HomePage() {
     });
     setNewTopicInput('');
   }, [customTopics, newTopicInput]);
+
+  const removeCustomTopic = useCallback((sourceKey) => {
+    if (!isCustomTopicSource(sourceKey)) {
+      return;
+    }
+
+    setCustomTopics((prev) => prev.filter((topic) => topic.key !== sourceKey));
+    setEnabledSources((prev) => {
+      const next = new Set(prev);
+      next.delete(sourceKey);
+      if (!next.size) {
+        next.add(DEFAULT_FEED_SOURCES[0]);
+      }
+      return next;
+    });
+    setCursorByCategory((prev) => {
+      if (!(sourceKey in prev)) {
+        return prev;
+      }
+
+      const next = { ...prev };
+      delete next[sourceKey];
+      return next;
+    });
+    setItemsByCategory((prev) => {
+      if (!(sourceKey in prev)) {
+        return prev;
+      }
+
+      const next = { ...prev };
+      delete next[sourceKey];
+      return next;
+    });
+  }, []);
 
   const adjustMindfulScore = useCallback((delta) => {
     if (!Number.isFinite(delta) || delta === 0) {
@@ -841,8 +893,11 @@ export default function HomePage() {
       queueSeenSave();
 
       const estimatedLines = estimateReadingLines(item);
-      const readGain = Math.min(10, 1 + Math.round(estimatedLines * 0.35));
-      adjustMindfulScore(readGain);
+      const viewGain = Math.min(
+        MINDFUL_SCORE_VIEW_GAIN_MAX,
+        Math.max(1, Math.ceil(estimatedLines / 10)),
+      );
+      adjustMindfulScore(viewGain);
     },
     [addSeenItems, adjustMindfulScore, queueSeenSave],
   );
@@ -1757,6 +1812,18 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      setSkipAutoBreathBreak(window.sessionStorage.getItem(BREATH_BREAK_SKIP_SESSION_KEY) === '1');
+    } catch {
+      // Ignore session storage read failures.
+    }
+  }, []);
+
+  useEffect(() => {
     mindfulScoreRef.current = mindfulScore;
     if (typeof window === 'undefined') {
       return;
@@ -1909,8 +1976,11 @@ export default function HomePage() {
       typeof window.matchMedia === 'function' &&
       window.matchMedia('(prefers-color-scheme: dark)').matches;
 
-    setIsDarkMode(storedTheme ? storedTheme === 'dark' : prefersDark);
+    const normalizedStoredTheme = THEME_MODES.includes(storedTheme) ? storedTheme : null;
+    setThemeMode(normalizedStoredTheme || (prefersDark ? THEME_MODE_DARK : THEME_MODE_LIGHT));
+    setHasExplicitThemeChoice(Boolean(normalizedStoredTheme));
     setIsLargeText(storedTextSize === 'large');
+    hasLoadedThemeRef.current = true;
 
     const mediaQuery =
       typeof window.matchMedia === 'function'
@@ -1918,8 +1988,8 @@ export default function HomePage() {
         : null;
 
     const onThemeChange = (event) => {
-      if (!storedTheme) {
-        setIsDarkMode(event.matches);
+      if (!normalizedStoredTheme) {
+        setThemeMode(event.matches ? THEME_MODE_DARK : THEME_MODE_LIGHT);
       }
     };
 
@@ -2140,7 +2210,25 @@ export default function HomePage() {
 
   const dismissBreathOverlay = useCallback(() => {
     setShowBreathOverlay(false);
+    setBreathOverlaySource(null);
     setIsBreathSoundReady(false);
+    activeVisibleTickRef.current = Date.now();
+  }, []);
+
+  const skipAutoBreathOverlayForSession = useCallback(() => {
+    setSkipAutoBreathBreak(true);
+    try {
+      if (typeof window !== 'undefined') {
+        window.sessionStorage.setItem(BREATH_BREAK_SKIP_SESSION_KEY, '1');
+      }
+    } catch {
+      // Ignore session storage write failures.
+    }
+
+    setShowBreathOverlay(false);
+    setBreathOverlaySource(null);
+    setIsBreathSoundReady(false);
+    activeVisibleMsRef.current = 0;
     activeVisibleTickRef.current = Date.now();
   }, []);
 
@@ -2198,6 +2286,7 @@ export default function HomePage() {
   }, []);
 
   const openBreathOverlay = useCallback(() => {
+    setBreathOverlaySource('manual');
     setShowBreathOverlay(true);
     setOpenMenuSlot(null);
     void startBreathSound();
@@ -2391,8 +2480,16 @@ export default function HomePage() {
     }
   }, []);
 
-  const toggleDarkMode = useCallback(() => {
-    setIsDarkMode((prev) => !prev);
+  const cycleThemeMode = useCallback(() => {
+    setHasExplicitThemeChoice(true);
+    setThemeMode((prev) => {
+      const currentIndex = THEME_MODES.indexOf(prev);
+      if (currentIndex === -1) {
+        return THEME_MODE_LIGHT;
+      }
+
+      return THEME_MODES[(currentIndex + 1) % THEME_MODES.length];
+    });
   }, []);
 
   const toggleTextSize = useCallback(() => {
@@ -2410,6 +2507,29 @@ export default function HomePage() {
       // Ignore storage write failures.
     }
   }, [cursorByCategory]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    document.body.dataset.theme = themeMode;
+    document.documentElement.dataset.theme = themeMode;
+
+    if (!hasLoadedThemeRef.current) {
+      return;
+    }
+
+    try {
+      if (hasExplicitThemeChoice) {
+        window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+      } else {
+        window.localStorage.removeItem(THEME_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore storage write failures.
+    }
+  }, [hasExplicitThemeChoice, themeMode]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -2530,7 +2650,12 @@ export default function HomePage() {
       const previous = activeVisibleTickRef.current || now;
       activeVisibleTickRef.current = now;
 
-      if (document.visibilityState !== 'visible' || showBreathOverlay || selectedTextItemId) {
+      if (
+        document.visibilityState !== 'visible' ||
+        showBreathOverlay ||
+        selectedTextItemId ||
+        skipAutoBreathBreak
+      ) {
         return;
       }
 
@@ -2539,6 +2664,7 @@ export default function HomePage() {
 
       if (activeVisibleMsRef.current >= BREATH_BREAK_INTERVAL_MS) {
         activeVisibleMsRef.current = 0;
+        setBreathOverlaySource('auto');
         setShowBreathOverlay(true);
       }
     };
@@ -2554,7 +2680,7 @@ export default function HomePage() {
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [selectedTextItemId, showBreathOverlay]);
+  }, [selectedTextItemId, showBreathOverlay, skipAutoBreathBreak]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -2782,7 +2908,7 @@ export default function HomePage() {
         });
       },
       {
-        threshold: 0.35,
+        threshold: MINDFUL_VIEW_THRESHOLD,
       },
     );
 
@@ -2852,16 +2978,41 @@ export default function HomePage() {
         <div className="topicToggleList" aria-label="Feed topics">
           {topicOptions.map((topic) => {
             const isActive = enabledSources.has(topic.key);
+            if (!topic.isCustom) {
+              return (
+                <button
+                  key={`${slot}-${topic.key}`}
+                  type="button"
+                  className={`topicToggleButton${isActive ? ' topicToggleButtonActive' : ''}`}
+                  onClick={() => toggleTopicSource(topic.key)}
+                  aria-pressed={isActive}
+                  title={topic.label}>
+                  {topic.label}
+                </button>
+              );
+            }
+
             return (
-              <button
+              <div
                 key={`${slot}-${topic.key}`}
-                type="button"
-                className={`topicToggleButton${isActive ? ' topicToggleButtonActive' : ''}`}
-                onClick={() => toggleTopicSource(topic.key)}
-                aria-pressed={isActive}
-                title={topic.label}>
-                {topic.isCustom ? `+ ${topic.label}` : topic.label}
-              </button>
+                className={`topicToggleChip${isActive ? ' topicToggleChipActive' : ''}`}>
+                <button
+                  type="button"
+                  className={`topicToggleButton topicToggleButtonCustom${isActive ? ' topicToggleButtonActive' : ''}`}
+                  onClick={() => toggleTopicSource(topic.key)}
+                  aria-pressed={isActive}
+                  title={topic.label}>
+                  {`+ ${topic.label}`}
+                </button>
+                <button
+                  type="button"
+                  className="topicRemoveButton"
+                  onClick={() => removeCustomTopic(topic.key)}
+                  aria-label={`Remove topic ${topic.label}`}
+                  title={`Remove ${topic.label}`}>
+                  <X size={12} aria-hidden="true" />
+                </button>
+              </div>
             );
           })}
         </div>
@@ -2895,16 +3046,31 @@ export default function HomePage() {
       enabledSources,
       handleNewTopicKeyDown,
       newTopicInput,
+      removeCustomTopic,
       topicOptions,
       toggleTopicSource,
     ],
   );
 
+  const themeLabel = THEME_LABELS[themeMode] || THEME_LABELS[THEME_MODE_LIGHT];
+  const themeIndex = THEME_MODES.indexOf(themeMode);
+  const normalizedThemeIndex = themeIndex >= 0 ? themeIndex : 0;
+  const nextThemeMode = THEME_MODES[(normalizedThemeIndex + 1) % THEME_MODES.length];
+  const nextThemeLabel = THEME_LABELS[nextThemeMode];
+  const ThemeIcon =
+    themeMode === THEME_MODE_DARK ? Moon : themeMode === THEME_MODE_PAPER ? Leaf : Sun;
+  const themeClassName =
+    themeMode === THEME_MODE_DARK
+      ? ' pageDark'
+      : themeMode === THEME_MODE_PAPER
+        ? ' pagePaper'
+        : '';
+
   return (
-    <main className={`page${isDarkMode ? ' pageDark' : ''}${isLargeText ? ' pageLargeText' : ''}`}>
+    <main className={`page${themeClassName}${isLargeText ? ' pageLargeText' : ''}`}>
       <header className="headerWrap">
         <p className="kicker">
-          the more u scroll, <br /> the higher ur score{' '}
+          the more u read, <br /> the higher ur score{' '}
         </p>
         <h1 className="title">_</h1>
         <p className="subtitle"></p>
@@ -2983,14 +3149,10 @@ export default function HomePage() {
               <button
                 className="installButton"
                 type="button"
-                onClick={toggleDarkMode}
-                aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-                title={isDarkMode ? 'Light mode' : 'Dark mode'}>
-                {isDarkMode ? (
-                  <Sun size={CONTROL_ICON_SIZE} aria-hidden="true" />
-                ) : (
-                  <Moon size={CONTROL_ICON_SIZE} aria-hidden="true" />
-                )}
+                onClick={cycleThemeMode}
+                aria-label={`Switch theme. Current: ${themeLabel}. Next: ${nextThemeLabel}.`}
+                title={`Theme: ${themeLabel}`}>
+                <ThemeIcon size={CONTROL_ICON_SIZE} aria-hidden="true" />
               </button>
 
               <button
@@ -3240,10 +3402,10 @@ export default function HomePage() {
               scroll too fast.
             </p>
             <ul className="scoreInfoList">
-              <li>+1 every 15 seconds while the feed stays visible.</li>
+              <li>+1 every 20 seconds while the feed stays visible.</li>
               <li>Fast down scrolling gives stronger penalties than up scrolling.</li>
               <li>Passive score gain pauses for 20 seconds after rapid down scrolling.</li>
-              <li>Reading/seeing an article adds points based on estimated read time.</li>
+              <li>Articles add a small bonus only after most of the card is in view.</li>
             </ul>
             <p className="scoreInfoSection">Icons</p>
             <ul className="scoreIconList" aria-label="Icon meanings">
@@ -3359,7 +3521,7 @@ export default function HomePage() {
         </div>
       ) : null}
 
-      {showBreathOverlay ? (
+	      {showBreathOverlay ? (
         <div
           className="breathOverlay"
           role="dialog"
@@ -3371,12 +3533,20 @@ export default function HomePage() {
             <div className="breathCircleWrap" aria-hidden="true">
               <div className="breathCircle" ref={breathCircleRef} />
             </div>
-            <p className="breathHint">Inhale 5s · exhale 5s</p>
-            {!isBreathSoundReady ? (
-              <button className="retryButton" type="button" onClick={enableBreathSound}>
-                Tap to enable sound
-              </button>
-            ) : null}
+	            <p className="breathHint">Inhale 5s · exhale 5s</p>
+	            {breathOverlaySource === 'auto' ? (
+	              <button
+	                className="retryButton breathSkipButton"
+	                type="button"
+	                onClick={skipAutoBreathOverlayForSession}>
+	                I can't meditate now
+	              </button>
+	            ) : null}
+	            {!isBreathSoundReady ? (
+	              <button className="retryButton" type="button" onClick={enableBreathSound}>
+	                Tap to enable sound
+	              </button>
+	            ) : null}
             <button className="retryButton" type="button" onClick={dismissBreathOverlay}>
               Close
             </button>
@@ -3446,14 +3616,10 @@ export default function HomePage() {
               <button
                 className="installButton"
                 type="button"
-                onClick={toggleDarkMode}
-                aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-                title={isDarkMode ? 'Light mode' : 'Dark mode'}>
-                {isDarkMode ? (
-                  <Sun size={CONTROL_ICON_SIZE} aria-hidden="true" />
-                ) : (
-                  <Moon size={CONTROL_ICON_SIZE} aria-hidden="true" />
-                )}
+                onClick={cycleThemeMode}
+                aria-label={`Switch theme. Current: ${themeLabel}. Next: ${nextThemeLabel}.`}
+                title={`Theme: ${themeLabel}`}>
+                <ThemeIcon size={CONTROL_ICON_SIZE} aria-hidden="true" />
               </button>
 
               <button

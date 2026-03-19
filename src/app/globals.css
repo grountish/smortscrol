@@ -37,6 +37,39 @@ body {
         color: var(--ink);
 }
 
+body[data-theme='dark'] {
+        background: radial-gradient(circle at 12% 10%, #2b2c31 0%, #1e1f23 56%, #121318 100%);
+        color: #f5f6f8;
+}
+
+body[data-theme='paper'] {
+        background-color: #eadbc3;
+        background-image:
+                radial-gradient(circle at 12% 14%, rgba(248, 236, 214, 0.43) 0%, rgba(248, 236, 214, 0) 32%),
+                radial-gradient(circle at 82% 20%, rgba(214, 186, 150, 0.18) 0%, rgba(214, 186, 150, 0) 28%),
+                radial-gradient(circle at 68% 76%, rgba(167, 128, 90, 0.1) 0%, rgba(167, 128, 90, 0) 26%),
+                repeating-linear-gradient(
+                        0deg,
+                        rgba(122, 93, 60, 0.028) 0px,
+                        rgba(122, 93, 60, 0.028) 1px,
+                        transparent 1px,
+                        transparent 4px
+                ),
+                repeating-linear-gradient(
+                        90deg,
+                        rgba(255, 255, 255, 0.07) 0px,
+                        rgba(255, 255, 255, 0.07) 1px,
+                        transparent 1px,
+                        transparent 5px
+                ),
+                url('/assets/texture/paper-texture.jpg'),
+                linear-gradient(180deg, #f5ead8 0%, #eadbc3 52%, #dfccb0 100%);
+        background-size: auto, auto, auto, auto, auto, 680px 680px, auto;
+        background-position: center top, center top, center top, center top, center top, center top, center top;
+        background-blend-mode: normal, normal, normal, normal, normal, soft-light, normal;
+        color: #33261a;
+}
+
 .page {
         max-width: 760px;
         margin: 0 auto;
@@ -66,6 +99,54 @@ body {
         --seen-border: #5a5c63;
         --seen-bg: #32343a;
         --seen-ink: #e6e8ed;
+}
+
+.pagePaper {
+        --paper: #f4ead9;
+        --ink: #342518;
+        --muted: #7a6550;
+        --line: #d5c0a3;
+        --panel: rgba(254, 249, 239, 0.8);
+        --accent: #996241;
+        --chip: rgba(239, 225, 198, 0.82);
+        --bg-start: #f7efdf;
+        --bg-mid: #efe1c8;
+        --bg-end: #e1cfb1;
+        --page-start: rgba(255, 250, 241, 0.9);
+        --page-end: rgba(241, 228, 203, 0.96);
+        --detail: #5a4735;
+        --install-border: #d0b089;
+        --install-bg: rgba(252, 241, 220, 0.92);
+        --install-ink: #7e4b2d;
+        --seen-border: #cfb897;
+        --seen-bg: rgba(246, 235, 211, 0.88);
+        --seen-ink: #604c38;
+        background-color: #f1e4cb;
+        background-image:
+                linear-gradient(180deg, rgba(248, 239, 222, 0.39), rgba(241, 228, 203, 0.94)),
+                radial-gradient(circle at 16% 12%, rgba(248, 239, 222, 0.25) 0%, rgba(248, 239, 222, 0) 30%),
+                radial-gradient(circle at 78% 72%, rgba(171, 133, 87, 0.12) 0%, rgba(171, 133, 87, 0) 24%),
+                repeating-linear-gradient(
+                        0deg,
+                        rgba(122, 93, 60, 0.03) 0px,
+                        rgba(122, 93, 60, 0.03) 1px,
+                        transparent 1px,
+                        transparent 6px
+                ),
+                repeating-linear-gradient(
+                        90deg,
+                        rgba(255, 255, 255, 0.09) 0px,
+                        rgba(255, 255, 255, 0.09) 1px,
+                        transparent 1px,
+                        transparent 7px
+                ),
+                url('/assets/texture/paper-texture.jpg');
+        background-size: auto, auto, auto, auto, auto, 720px 720px;
+        background-position: center top, center top, center top, center top, center top, center top;
+        background-blend-mode: normal, normal, normal, normal, normal, multiply;
+        box-shadow:
+                inset 0 1px 0 rgba(255, 255, 255, 0.45),
+                inset 0 0 0 1px rgba(152, 118, 77, 0.08);
 }
 
 .pageLargeText {
@@ -112,6 +193,10 @@ body {
 }
 
 .pageDark .headerWrap {
+        background: transparent;
+}
+
+.pagePaper .headerWrap {
         background: transparent;
 }
 
@@ -342,6 +427,21 @@ body {
         gap: 6px;
 }
 
+.topicToggleChip {
+        display: inline-flex;
+        align-items: stretch;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--chip);
+        overflow: hidden;
+        max-width: 100%;
+}
+
+.topicToggleChipActive {
+        border-color: var(--install-border);
+        background: var(--install-bg);
+}
+
 .topicToggleButton {
         border: 1px solid var(--line);
         background: var(--chip);
@@ -357,10 +457,35 @@ body {
         cursor: pointer;
 }
 
+.topicToggleButtonCustom {
+        border: 0;
+        border-radius: 0;
+        min-width: 0;
+}
+
 .topicToggleButtonActive {
         border-color: var(--install-border);
         background: var(--install-bg);
         color: var(--install-ink);
+}
+
+.topicRemoveButton {
+        border: 0;
+        border-left: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+        background: transparent;
+        color: var(--muted);
+        width: 28px;
+        min-width: 28px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        cursor: pointer;
+}
+
+.topicToggleChipActive .topicRemoveButton {
+        color: var(--install-ink);
+        border-left-color: color-mix(in srgb, var(--install-border) 72%, transparent);
 }
 
 .topicInputRow {
@@ -431,6 +556,18 @@ body {
         border-bottom: 1px solid var(--line);
         padding: 18px 20px;
         outline: none;
+}
+
+.pagePaper .card {
+        background-color: rgba(254, 249, 239, 0.86);
+        background-image:
+                linear-gradient(180deg, rgba(248, 239, 223, 0.41), rgba(243, 232, 209, 0.9)),
+                radial-gradient(circle at 14% 12%, rgba(248, 239, 223, 0.2) 0%, rgba(248, 239, 223, 0) 26%),
+                url('/assets/texture/paper-texture.jpg');
+        background-size: auto, auto, 620px 620px;
+        background-position: center top, center top, center top;
+        background-blend-mode: normal, normal, multiply;
+        box-shadow: inset 0 -1px 0 rgba(152, 118, 77, 0.05);
 }
 
 .card[role='button'] {
@@ -615,6 +752,14 @@ body {
         color: var(--detail);
 }
 
+.pagePaper .stateTitle {
+        color: color-mix(in srgb, var(--ink) 78%, var(--accent));
+}
+
+.pagePaper .stateDetail {
+        color: var(--detail);
+}
+
 .retryButton {
         margin-top: 12px;
         border: 0;
@@ -627,6 +772,12 @@ body {
         text-transform: uppercase;
         letter-spacing: 0.08em;
         cursor: pointer;
+}
+
+.breathSkipButton {
+        background: color-mix(in srgb, var(--chip) 82%, var(--paper));
+        color: var(--ink);
+        border: 1px solid var(--line);
 }
 
 .modalBackdrop {
@@ -866,6 +1017,11 @@ body {
         background: color-mix(in srgb, var(--page-end) 82%, rgba(0, 0, 0, 0.12));
 }
 
+.pagePaper .bottomBar {
+        background: color-mix(in srgb, var(--page-end) 90%, rgba(255, 248, 233, 0.24));
+        backdrop-filter: blur(14px) saturate(0.78);
+}
+
 @media (max-width: 640px) {
         .page {
                 border: 0;
@@ -907,6 +1063,11 @@ body {
         .topicToggleButton {
                 font-size: 12px;
                 padding: 6px 10px;
+        }
+
+        .topicRemoveButton {
+                width: 32px;
+                min-width: 32px;
         }
 
         .topicAddButton {
