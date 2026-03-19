@@ -349,6 +349,13 @@ body[data-theme='paper'] {
         cursor: pointer;
 }
 
+.installButtonActive {
+        border-color: var(--ink);
+        background: var(--ink);
+        color: var(--paper);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--paper) 12%, transparent);
+}
+
 .menuWrap {
         position: relative;
         display: inline-flex;

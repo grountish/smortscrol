@@ -3317,7 +3317,7 @@ export default function HomePage() {
               </button>
 
               <button
-                className="installButton"
+                className={`installButton${isLargeText ? ' installButtonActive' : ''}`}
                 type="button"
                 onClick={toggleTextSize}
                 aria-label={isLargeText ? 'Use normal text size' : 'Use larger text size'}
@@ -3793,7 +3793,7 @@ export default function HomePage() {
               </button>
 
               <button
-                className="installButton"
+                className={`installButton${isLargeText ? ' installButtonActive' : ''}`}
                 type="button"
                 onClick={toggleTextSize}
                 aria-label={isLargeText ? 'Use normal text size' : 'Use larger text size'}
