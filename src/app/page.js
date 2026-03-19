@@ -588,6 +588,7 @@ export default function HomePage() {
   const [isLargeText, setIsLargeText] = useState(false);
   const [hasExplicitThemeChoice, setHasExplicitThemeChoice] = useState(false);
   const [enabledSources, setEnabledSources] = useState(new Set(DEFAULT_FEED_SOURCES));
+  const [removedDefaultSources, setRemovedDefaultSources] = useState(new Set());
   const [customTopics, setCustomTopics] = useState([]);
   const [newTopicInput, setNewTopicInput] = useState('');
   const [speakingItemId, setSpeakingItemId] = useState(null);
@@ -665,18 +666,23 @@ export default function HomePage() {
     [customTopics],
   );
 
+  const availableDefaultSources = useMemo(
+    () => DEFAULT_FEED_SOURCES.filter((sourceKey) => !removedDefaultSources.has(sourceKey)),
+    [removedDefaultSources],
+  );
+
   const activeFeedSources = useMemo(() => {
     const enabled = enabledSources instanceof Set ? enabledSources : new Set();
-    const activeDefault = DEFAULT_FEED_SOURCES.filter((sourceKey) => enabled.has(sourceKey));
+    const activeDefault = availableDefaultSources.filter((sourceKey) => enabled.has(sourceKey));
     const activeCustom = customTopics
       .filter((topic) => enabled.has(topic.key))
       .map((topic) => topic.key);
 
     return [...activeDefault, ...activeCustom];
-  }, [customTopics, enabledSources]);
+  }, [availableDefaultSources, customTopics, enabledSources]);
 
   const topicOptions = useMemo(() => {
-    const defaults = DEFAULT_FEED_SOURCES.map((sourceKey) => ({
+    const defaults = availableDefaultSources.map((sourceKey) => ({
       key: sourceKey,
       label: CATEGORY_LABELS[sourceKey] || sourceKey,
       isCustom: false,
@@ -689,7 +695,7 @@ export default function HomePage() {
     }));
 
     return [...defaults, ...custom];
-  }, [customTopics]);
+  }, [availableDefaultSources, customTopics]);
 
   const toggleTopicSource = useCallback((sourceKey) => {
     if (!sourceKey) {
@@ -747,20 +753,7 @@ export default function HomePage() {
     setNewTopicInput('');
   }, [customTopics, newTopicInput]);
 
-  const removeCustomTopic = useCallback((sourceKey) => {
-    if (!isCustomTopicSource(sourceKey)) {
-      return;
-    }
-
-    setCustomTopics((prev) => prev.filter((topic) => topic.key !== sourceKey));
-    setEnabledSources((prev) => {
-      const next = new Set(prev);
-      next.delete(sourceKey);
-      if (!next.size) {
-        next.add(DEFAULT_FEED_SOURCES[0]);
-      }
-      return next;
-    });
+  const clearSourceCache = useCallback((sourceKey) => {
     setCursorByCategory((prev) => {
       if (!(sourceKey in prev)) {
         return prev;
@@ -780,6 +773,90 @@ export default function HomePage() {
       return next;
     });
   }, []);
+
+  const removeCustomTopic = useCallback((sourceKey) => {
+    if (!isCustomTopicSource(sourceKey)) {
+      return;
+    }
+
+    setCustomTopics((prev) => prev.filter((topic) => topic.key !== sourceKey));
+    setEnabledSources((prev) => {
+      const next = new Set(prev);
+      next.delete(sourceKey);
+      return next;
+    });
+    clearSourceCache(sourceKey);
+  }, [clearSourceCache]);
+
+  const removeTopicSource = useCallback(
+    (sourceKey) => {
+      if (isCustomTopicSource(sourceKey)) {
+        removeCustomTopic(sourceKey);
+        return;
+      }
+
+      if (!DEFAULT_FEED_SOURCES.includes(sourceKey)) {
+        return;
+      }
+
+      setRemovedDefaultSources((prev) => {
+        const next = new Set(prev);
+        next.add(sourceKey);
+        return next;
+      });
+      setEnabledSources((prev) => {
+        const next = new Set(prev);
+        next.delete(sourceKey);
+        return next;
+      });
+      clearSourceCache(sourceKey);
+    },
+    [clearSourceCache, removeCustomTopic],
+  );
+
+  const restoreDefaultSettings = useCallback(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const prefersDark =
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+    try {
+      [
+        THEME_STORAGE_KEY,
+        TEXT_SIZE_STORAGE_KEY,
+        VOICE_STORAGE_KEY,
+        CURSOR_STORAGE_KEY,
+        READING_GUIDE_STORAGE_KEY,
+        AUTO_SCROLL_STORAGE_KEY,
+        TOPIC_PREFERENCES_STORAGE_KEY,
+      ].forEach((key) => window.localStorage.removeItem(key));
+      window.sessionStorage.removeItem(BREATH_BREAK_SKIP_SESSION_KEY);
+    } catch {
+      // Ignore storage reset failures.
+    }
+
+    setThemeMode(prefersDark ? THEME_MODE_DARK : THEME_MODE_LIGHT);
+    setHasExplicitThemeChoice(false);
+    setIsLargeText(false);
+    setSelectedVoiceUri(availableVoices[0]?.voiceURI || null);
+    setShowReadingGuide(false);
+    setIsAutoScrollEnabled(false);
+    setSkipAutoBreathBreak(false);
+    setBreathOverlaySource(null);
+    setShowBreathOverlay(false);
+    setIsBreathSoundReady(false);
+    setRemovedDefaultSources(new Set());
+    setCustomTopics([]);
+    setEnabledSources(new Set(DEFAULT_FEED_SOURCES));
+    setCursorByCategory({});
+    setNewTopicInput('');
+    setOpenMenuSlot(null);
+    activeVisibleMsRef.current = 0;
+    activeVisibleTickRef.current = Date.now();
+  }, [availableVoices]);
 
   const adjustMindfulScore = useCallback((delta) => {
     if (!Number.isFinite(delta) || delta === 0) {
@@ -2544,6 +2621,11 @@ export default function HomePage() {
 
       const parsed = JSON.parse(rawValue);
       const parsedTopicsRaw = Array.isArray(parsed?.customTopics) ? parsed.customTopics : [];
+      const parsedRemovedDefaults = new Set(
+        Array.isArray(parsed?.removedDefaultSources)
+          ? parsed.removedDefaultSources.filter((key) => DEFAULT_FEED_SOURCES.includes(key))
+          : [],
+      );
       const takenKeys = new Set(DEFAULT_FEED_SOURCES);
       const parsedTopics = parsedTopicsRaw
         .map((topic) => {
@@ -2571,9 +2653,14 @@ export default function HomePage() {
         .filter(Boolean);
 
       setCustomTopics(parsedTopics);
+      setRemovedDefaultSources(parsedRemovedDefaults);
+
+      const availableDefaultKeys = DEFAULT_FEED_SOURCES.filter(
+        (sourceKey) => !parsedRemovedDefaults.has(sourceKey),
+      );
 
       const validSourceKeys = new Set([
-        ...DEFAULT_FEED_SOURCES,
+        ...availableDefaultKeys,
         ...parsedTopics.map((topic) => topic.key),
       ]);
       const parsedEnabled = Array.isArray(parsed?.enabledSources)
@@ -2583,7 +2670,7 @@ export default function HomePage() {
       if (parsedEnabled.length) {
         setEnabledSources(new Set(parsedEnabled));
       } else {
-        setEnabledSources(new Set(DEFAULT_FEED_SOURCES));
+        setEnabledSources(new Set(availableDefaultKeys));
       }
     } catch {
       // Ignore invalid stored topic preferences.
@@ -2598,15 +2685,16 @@ export default function HomePage() {
     try {
       window.localStorage.setItem(
         TOPIC_PREFERENCES_STORAGE_KEY,
-        JSON.stringify({
-          enabledSources: Array.from(enabledSources),
-          customTopics,
-        }),
-      );
+          JSON.stringify({
+            enabledSources: Array.from(enabledSources),
+            removedDefaultSources: Array.from(removedDefaultSources),
+            customTopics,
+          }),
+        );
     } catch {
       // Ignore storage write failures.
     }
-  }, [customTopics, enabledSources]);
+  }, [customTopics, enabledSources, removedDefaultSources]);
 
   useEffect(() => {
     feedSourceOrderRef.current = shuffleArray(activeFeedSources);
@@ -2978,20 +3066,6 @@ export default function HomePage() {
         <div className="topicToggleList" aria-label="Feed topics">
           {topicOptions.map((topic) => {
             const isActive = enabledSources.has(topic.key);
-            if (!topic.isCustom) {
-              return (
-                <button
-                  key={`${slot}-${topic.key}`}
-                  type="button"
-                  className={`topicToggleButton${isActive ? ' topicToggleButtonActive' : ''}`}
-                  onClick={() => toggleTopicSource(topic.key)}
-                  aria-pressed={isActive}
-                  title={topic.label}>
-                  {topic.label}
-                </button>
-              );
-            }
-
             return (
               <div
                 key={`${slot}-${topic.key}`}
@@ -3002,12 +3076,12 @@ export default function HomePage() {
                   onClick={() => toggleTopicSource(topic.key)}
                   aria-pressed={isActive}
                   title={topic.label}>
-                  {`+ ${topic.label}`}
+                  {topic.isCustom ? `+ ${topic.label}` : topic.label}
                 </button>
                 <button
                   type="button"
                   className="topicRemoveButton"
-                  onClick={() => removeCustomTopic(topic.key)}
+                  onClick={() => removeTopicSource(topic.key)}
                   aria-label={`Remove topic ${topic.label}`}
                   title={`Remove ${topic.label}`}>
                   <X size={12} aria-hidden="true" />
@@ -3046,7 +3120,7 @@ export default function HomePage() {
       enabledSources,
       handleNewTopicKeyDown,
       newTopicInput,
-      removeCustomTopic,
+      removeTopicSource,
       topicOptions,
       toggleTopicSource,
     ],
@@ -3058,7 +3132,7 @@ export default function HomePage() {
   const nextThemeMode = THEME_MODES[(normalizedThemeIndex + 1) % THEME_MODES.length];
   const nextThemeLabel = THEME_LABELS[nextThemeMode];
   const ThemeIcon =
-    themeMode === THEME_MODE_DARK ? Moon : themeMode === THEME_MODE_PAPER ? Leaf : Sun;
+    themeMode === THEME_MODE_DARK ? Moon : themeMode === THEME_MODE_PAPER ? BookText : Sun;
   const themeClassName =
     themeMode === THEME_MODE_DARK
       ? ' pageDark'
@@ -3426,7 +3500,8 @@ export default function HomePage() {
                 Ambient sound
               </li>
               <li>
-                <Sun size={14} aria-hidden="true" /> / <Moon size={14} aria-hidden="true" /> Theme
+                <Sun size={14} aria-hidden="true" /> / <BookText size={14} aria-hidden="true" /> /{' '}
+                <Moon size={14} aria-hidden="true" /> Theme
               </li>
               <li>
                 <Type size={14} aria-hidden="true" /> Text size
@@ -3514,6 +3589,10 @@ export default function HomePage() {
               </button>
             </div>
             {renderTopicControls(openMenuSlot)}
+            <p className="dropdownHint">Restore defaults to bring back removed built-in topics.</p>
+            <button className="retryButton" type="button" onClick={restoreDefaultSettings}>
+              Restore Default Settings
+            </button>
             <button className="retryButton" type="button" onClick={() => setOpenMenuSlot(null)}>
               Close
             </button>
