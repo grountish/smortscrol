@@ -23,6 +23,7 @@ import {
   X,
 } from 'lucide-react';
 import curatedArtTerms from '../data/art_highlights.json';
+import { AudioPlayer, MusicCover } from './audio-player';
 
 const CATEGORIES = [
   { key: 'feed', label: 'Feed' },
@@ -55,6 +56,7 @@ const CATEGORY_LABELS = {
   'local-gallery': '*',
   'art-history': 'Art History',
   'music-history': 'Music History',
+  'music-world': 'World Music',
   philosophy: 'Philosophy',
   science: 'Science',
   'computer-science': 'Computer Science',
@@ -68,6 +70,7 @@ const CATEGORY_LABELS = {
 
 const PAGE_SIZE = 15;
 const PAGE_SIZE_ART = 10;
+const PAGE_SIZE_MUSIC = 8;
 const LOAD_MORE_BATCH_MAX = 7;
 const ART_CURATED_BATCH = 12;
 const CONTROL_ICON_SIZE = 16;
@@ -116,12 +119,15 @@ const CUSTOM_TOPIC_PREFIX = 'custom-topic:';
 const TUMBLR_INSERT_EVERY = 10;
 const LOCAL_GALLERY_INSERT_EVERY = 20;
 const ART_QUERY = 'painting';
+const MUSIC_QUERY =
+  'collection:vinyl_archive-of-contemporary-music-records AND mediatype:audio';
 const DEFAULT_FEED_SOURCES = [
   'art',
   'tumblr-gallery',
   'local-gallery',
   'art-history',
   'music-history',
+  'music-world',
   'philosophy',
   'science',
   'computer-science',
@@ -325,13 +331,53 @@ function getNextSeed(seed) {
   return (normalizeSeed(seed) * 1664525 + 1013904223) >>> 0;
 }
 
+function useColumnCount() {
+  const [cols, setCols] = useState(1);
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) {
+      return undefined;
+    }
+    const wide = window.matchMedia('(min-width: 1100px)');
+    const wider = window.matchMedia('(min-width: 1560px)');
+    const update = () => setCols(wider.matches ? 3 : wide.matches ? 2 : 1);
+    update();
+    wide.addEventListener('change', update);
+    wider.addEventListener('change', update);
+    return () => {
+      wide.removeEventListener('change', update);
+      wider.removeEventListener('change', update);
+    };
+  }, []);
+  return cols;
+}
+
+// Distribute pre-rendered card elements into N column buckets. Round-robin by
+// index keeps existing cards in place when a new batch is appended (no
+// masonry reflow jump), while preserving element keys/refs.
+function renderFeedColumns(cards, columnCount) {
+  if (columnCount <= 1) {
+    return cards;
+  }
+  return Array.from({ length: columnCount }, (_, col) => (
+    <div className="feedCol" key={col}>
+      {cards.filter((_, index) => index % columnCount === col)}
+    </div>
+  ));
+}
+
 function mergeItems(currentItems, nextItems) {
   if (!nextItems.length) {
     return currentItems;
   }
 
   const seen = new Set(currentItems.map((item) => item.id));
-  const uniqueNext = nextItems.filter((item) => !seen.has(item.id));
+  const uniqueNext = nextItems.filter((item) => {
+    if (!item?.id || seen.has(item.id)) {
+      return false;
+    }
+    seen.add(item.id);
+    return true;
+  });
   return [...currentItems, ...uniqueNext];
 }
 
@@ -436,6 +482,26 @@ function getParagraphs(text) {
     .split(/\n\s*\n+/)
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+// Wikipedia extracts drop section titles ("History", "Neural mechanisms of
+// sensitization") in as short standalone lines. Detect them so the reader can
+// give them heading weight instead of rendering a flat wall of text.
+function isLikelyHeading(text) {
+  const value = String(text || '').trim();
+  if (value.length < 2 || value.length > 60) {
+    return false;
+  }
+  if (/[.!?:;,]$/.test(value)) {
+    return false;
+  }
+  if (/[.!?]\s/.test(value)) {
+    return false;
+  }
+  if (!/^[A-Z0-9"“]/.test(value)) {
+    return false;
+  }
+  return value.split(/\s+/).length <= 8;
 }
 
 function sanitizeWikiText(text) {
@@ -617,8 +683,10 @@ export default function HomePage() {
   const [loadingByCategory, setLoadingByCategory] = useState({});
   const [errorByCategory, setErrorByCategory] = useState({});
   const [activeImage, setActiveImage] = useState(null);
+  const columnCount = useColumnCount();
   const [cursorByCategory, setCursorByCategory] = useState({});
   const [expandedIds, setExpandedIds] = useState({});
+  const [readerItemId, setReaderItemId] = useState(null);
   const [loadingFullText, setLoadingFullText] = useState({});
   const [hiddenIds, setHiddenIds] = useState(new Set());
   const [seenItems, setSeenItems] = useState([]);
@@ -691,6 +759,11 @@ export default function HomePage() {
     return items.filter((item) => !hiddenIds.has(item.id) || favoriteIds.has(item.id));
   }, [category, items, hiddenIds, favoriteIds, seenItems, favoriteItems]);
 
+  const readerItem = useMemo(
+    () => (readerItemId ? filteredItems.find((item) => item.id === readerItemId) || null : null),
+    [filteredItems, readerItemId],
+  );
+
   const customTopicsByKey = useMemo(
     () =>
       new Map(
@@ -720,6 +793,21 @@ export default function HomePage() {
 
     return [...activeDefault, ...activeCustom];
   }, [availableDefaultSources, customTopics, enabledSources]);
+
+  useEffect(() => {
+    const activeSet = new Set(activeFeedSources);
+    setItemsByCategory((prev) => {
+      const feed = prev.feed;
+      if (!Array.isArray(feed) || !feed.length) {
+        return prev;
+      }
+      const pruned = feed.filter((item) => activeSet.has(getItemSource(item)));
+      if (pruned.length === feed.length) {
+        return prev;
+      }
+      return { ...prev, feed: pruned };
+    });
+  }, [activeFeedSources]);
 
   const topicOptions = useMemo(() => {
     const defaults = availableDefaultSources.map((sourceKey) => ({
@@ -1094,7 +1182,13 @@ export default function HomePage() {
         return;
       }
 
-      setExpandedIds((prev) => ({ ...prev, [item.id]: !prev[item.id] }));
+      if (columnCount > 1) {
+        // Desktop: open the reader dialog instead of expanding in place, so
+        // the feed layout stays put.
+        setReaderItemId(item.id);
+      } else {
+        setExpandedIds((prev) => ({ ...prev, [item.id]: !prev[item.id] }));
+      }
 
       if (item.detailFull || !item.wikiTitle) {
         return;
@@ -1110,7 +1204,7 @@ export default function HomePage() {
         setLoadingFullText((prev) => ({ ...prev, [item.id]: false }));
       }
     },
-    [fetchWikiFullText, updateItemById],
+    [columnCount, fetchWikiFullText, updateItemById],
   );
 
   const fetchBatch = useCallback(
@@ -1435,6 +1529,82 @@ export default function HomePage() {
             offset: nextOffset,
             seed: nextSeed,
           },
+        };
+      }
+
+      if (targetCategory === 'music-world') {
+        const searchResponse = await fetch(
+          `https://archive.org/advancedsearch.php?q=${encodeURIComponent(
+            MUSIC_QUERY,
+          )}&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=year&rows=${PAGE_SIZE_MUSIC}&sort[]=random&output=json`,
+        );
+        const searchJson = await parseJsonResponse(
+          searchResponse,
+          'Internet Archive returned a non-JSON search response.',
+        );
+
+        const docs = Array.isArray(searchJson?.response?.docs) ? searchJson.response.docs : [];
+
+        const built = await mapInBatches(docs, 3, async (doc) => {
+          const identifier = doc?.identifier;
+          if (!identifier) {
+            return null;
+          }
+
+          const metaResponse = await fetch(
+            `https://archive.org/metadata/${encodeURIComponent(identifier)}`,
+          );
+          const metaJson = await parseJsonResponse(
+            metaResponse,
+            'Internet Archive returned a non-JSON metadata response.',
+          ).catch(() => null);
+
+          const files = Array.isArray(metaJson?.files) ? metaJson.files : [];
+          const audioFile =
+            files.find((file) => /\.mp3$/i.test(file?.name || '')) ||
+            files.find((file) => /\.(ogg|m4a|flac)$/i.test(file?.name || ''));
+
+          if (!audioFile?.name) {
+            return null;
+          }
+
+          const coverFile =
+            files.find((file) => /_itemimage\.(png|jpe?g)$/i.test(file?.name || '')) ||
+            files.find((file) => (file?.format || '') === 'Item Image') ||
+            files.find(
+              (file) =>
+                /\.(png|jpe?g)$/i.test(file?.name || '') &&
+                !/_spectrogram/i.test(file?.name || '') &&
+                (file?.format || '') !== 'Item Tile',
+            );
+          const encodePath = (name) => name.split('/').map(encodeURIComponent).join('/');
+          const imageUrl = coverFile?.name
+            ? `https://archive.org/download/${encodeURIComponent(identifier)}/${encodePath(
+                coverFile.name,
+              )}`
+            : null;
+
+          const creator = Array.isArray(doc.creator) ? doc.creator.join(', ') : doc.creator;
+
+          return {
+            id: `music-world-${identifier}`,
+            source: targetCategory,
+            title: doc.title || audioFile.title || identifier,
+            detail: [creator && `Artist: ${creator}`, doc.year && `Year: ${doc.year}`]
+              .filter(Boolean)
+              .join(' - '),
+            tag: `Internet Archive - ${CATEGORY_LABELS[targetCategory]}`,
+            imageUrl,
+            audioUrl: `https://archive.org/download/${encodeURIComponent(
+              identifier,
+            )}/${encodePath(audioFile.name)}`,
+            webUrl: `https://archive.org/details/${encodeURIComponent(identifier)}`,
+          };
+        });
+
+        return {
+          items: built.filter(Boolean),
+          cursor: {},
         };
       }
 
@@ -2496,6 +2666,29 @@ export default function HomePage() {
   }, [closeScoreInfo, showScoreInfo]);
 
   useEffect(() => {
+    if (columnCount <= 1) {
+      setReaderItemId(null);
+    }
+  }, [columnCount]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !readerItemId) {
+      return;
+    }
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setReaderItemId(null);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [readerItemId]);
+
+  useEffect(() => {
     if (showBreathOverlay) {
       void startBreathSound();
       return;
@@ -3329,8 +3522,8 @@ export default function HomePage() {
         </div>
       </header>
 
-      <section className="feed" aria-live="polite">
-        {filteredItems.map((item) => {
+      <section className="feed" data-cols={columnCount} aria-live="polite">
+        {renderFeedColumns(filteredItems.map((item) => {
           const isFavorite = favoriteIds.has(item.id);
           const isSpeaking = speakingItemId === item.id;
           const isWikipediaItem = Boolean(item.wikiTitle);
@@ -3383,6 +3576,8 @@ export default function HomePage() {
                     onError={handleImageLoadError}
                   />
                 </button>
+              ) : item.audioUrl ? (
+                <MusicCover id={item.id} />
               ) : null}
 
               <div className="cardMeta">
@@ -3462,6 +3657,7 @@ export default function HomePage() {
                   <p className="cardDetail">{displayText}</p>
                 ) : null}
               </div>
+              {item.audioUrl ? <AudioPlayer src={item.audioUrl} /> : null}
               {canToggle ? (
                 <p className="cardHint">{isExpanded ? 'Tap to collapse' : 'Tap to expand'}</p>
               ) : null}
@@ -3480,7 +3676,7 @@ export default function HomePage() {
               ) : null}
             </article>
           );
-        })}
+        }), columnCount)}
       </section>
 
       <footer className="footer">
@@ -3550,6 +3746,72 @@ export default function HomePage() {
             alt="Expanded artwork"
             onError={handleImageLoadError}
           />
+        </div>
+      ) : null}
+
+      {readerItem ? (
+        <div className="dialogBackdrop" role="presentation" onClick={() => setReaderItemId(null)}>
+          <div
+            className="dialogCard readerCard"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reader-title"
+            onClick={(event) => event.stopPropagation()}>
+            <div className="readerHead">
+              <p className="cardTag">{readerItem.tag}</p>
+              <button
+                className="favoriteButton"
+                type="button"
+                onClick={() => setReaderItemId(null)}
+                aria-label="Close reader">
+                <X size={18} aria-hidden="true" />
+              </button>
+            </div>
+            {readerItem.imageUrl ? (
+              <img
+                src={readerItem.imageUrl}
+                className="readerImage"
+                alt={readerItem.title}
+                onError={handleImageLoadError}
+              />
+            ) : null}
+            <h2 className="cardTitle" id="reader-title">
+              {readerItem.title}
+            </h2>
+            {loadingFullText[readerItem.id] ? (
+              <p className="cardDetail">Loading full text...</p>
+            ) : (
+              (() => {
+                let seenBody = false;
+                return getParagraphs(readerItem.detailFull || readerItem.detail).map(
+                  (para, index) => {
+                    if (isLikelyHeading(para)) {
+                      return (
+                        <h3 key={`reader-p-${index}`} className="readerSection">
+                          {para}
+                        </h3>
+                      );
+                    }
+                    const isLead = !seenBody;
+                    seenBody = true;
+                    return (
+                      <p
+                        key={`reader-p-${index}`}
+                        className={isLead ? 'cardDetail readerLead' : 'cardDetail'}>
+                        {para}
+                      </p>
+                    );
+                  },
+                );
+              })()
+            )}
+            {readerItem.audioUrl ? <AudioPlayer src={readerItem.audioUrl} /> : null}
+            {readerItem.webUrl ? (
+              <a href={readerItem.webUrl} className="cardLink" target="_blank" rel="noreferrer">
+                Open source
+              </a>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
