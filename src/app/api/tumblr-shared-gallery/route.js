@@ -227,7 +227,6 @@ export async function GET(request) {
     npf: 'true',
     reblog_info: 'false',
     notes_info: 'false',
-    type: 'photo',
     offset: String(offset),
     limit: String(limit),
   };

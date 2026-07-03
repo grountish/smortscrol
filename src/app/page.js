@@ -338,7 +338,7 @@ function useColumnCount() {
       return undefined;
     }
     const wide = window.matchMedia('(min-width: 1100px)');
-    const wider = window.matchMedia('(min-width: 1560px)');
+    const wider = window.matchMedia('(min-width: 1360px)');
     const update = () => setCols(wider.matches ? 3 : wide.matches ? 2 : 1);
     update();
     wide.addEventListener('change', update);
@@ -728,6 +728,7 @@ export default function HomePage() {
   const bootstrappedFeedRef = useRef(false);
   const cardRefs = useRef({});
   const readContentRefs = useRef({});
+  const readerContentRef = useRef(null);
   const loadMoreSentinelRef = useRef(null);
   const feedSourceOrderRef = useRef([]);
   const feedSourceIndexRef = useRef(0);
@@ -3180,12 +3181,12 @@ export default function HomePage() {
     delete readContentRefs.current[id];
   }, []);
 
-  const selectArticleText = useCallback((item) => {
+  const selectArticleText = useCallback((item, explicitNode) => {
     if (!item?.id || typeof window === 'undefined') {
       return;
     }
 
-    const node = readContentRefs.current[item.id];
+    const node = explicitNode || readContentRefs.current[item.id];
     if (!node || !window.getSelection || !document.createRange) {
       return;
     }
@@ -3759,13 +3760,70 @@ export default function HomePage() {
             onClick={(event) => event.stopPropagation()}>
             <div className="readerHead">
               <p className="cardTag">{readerItem.tag}</p>
-              <button
-                className="favoriteButton"
-                type="button"
-                onClick={() => setReaderItemId(null)}
-                aria-label="Close reader">
-                <X size={18} aria-hidden="true" />
-              </button>
+              <div className="readerActions">
+                {category === 'feed' ? (
+                  <button
+                    className="seenButton"
+                    type="button"
+                    onClick={() => markSeen(readerItem)}
+                    aria-label={`Mark ${readerItem.title} as seen`}
+                    title="Mark seen">
+                    <Eye size={18} aria-hidden="true" />
+                  </button>
+                ) : null}
+                <button
+                  className="favoriteButton"
+                  type="button"
+                  onClick={() => toggleFavorite(readerItem)}
+                  aria-label={
+                    favoriteIds.has(readerItem.id)
+                      ? `Unfavorite ${readerItem.title}`
+                      : `Save ${readerItem.title}`
+                  }
+                  title={favoriteIds.has(readerItem.id) ? 'Saved' : 'Save'}>
+                  <Heart
+                    size={18}
+                    aria-hidden="true"
+                    fill={favoriteIds.has(readerItem.id) ? 'currentColor' : 'none'}
+                  />
+                </button>
+                {readerItem.wikiTitle ? (
+                  <button
+                    className="favoriteButton"
+                    type="button"
+                    onClick={() => toggleReadAloud(readerItem)}
+                    aria-label={
+                      speakingItemId === readerItem.id
+                        ? `Stop reading ${readerItem.title}`
+                        : `Read aloud ${readerItem.title}`
+                    }
+                    title={speakingItemId === readerItem.id ? 'Stop' : 'Read aloud'}>
+                    {speakingItemId === readerItem.id ? (
+                      <Square size={18} aria-hidden="true" />
+                    ) : (
+                      <Volume2 size={18} aria-hidden="true" />
+                    )}
+                  </button>
+                ) : null}
+                {readerItem.wikiTitle ? (
+                  <button
+                    className="favoriteButton"
+                    type="button"
+                    onClick={() => selectArticleText(readerItem, readerContentRef.current)}
+                    aria-label={`Select text for ${readerItem.title}`}
+                    title="Select text">
+                    <Highlighter size={18} aria-hidden="true" />
+                  </button>
+                ) : null}
+                <button
+                  className="favoriteButton"
+                  type="button"
+                  onClick={() => setReaderItemId(null)}
+                  aria-label="Close reader"
+                  title="Close">
+                  <X size={18} aria-hidden="true" />
+                </button>
+              </div>
             </div>
             {readerItem.imageUrl ? (
               <img
@@ -3781,29 +3839,31 @@ export default function HomePage() {
             {loadingFullText[readerItem.id] ? (
               <p className="cardDetail">Loading full text...</p>
             ) : (
-              (() => {
-                let seenBody = false;
-                return getParagraphs(readerItem.detailFull || readerItem.detail).map(
-                  (para, index) => {
-                    if (isLikelyHeading(para)) {
+              <div className="readerBody" ref={readerContentRef}>
+                {(() => {
+                  let seenBody = false;
+                  return getParagraphs(readerItem.detailFull || readerItem.detail).map(
+                    (para, index) => {
+                      if (isLikelyHeading(para)) {
+                        return (
+                          <h3 key={`reader-p-${index}`} className="readerSection">
+                            {para}
+                          </h3>
+                        );
+                      }
+                      const isLead = !seenBody;
+                      seenBody = true;
                       return (
-                        <h3 key={`reader-p-${index}`} className="readerSection">
+                        <p
+                          key={`reader-p-${index}`}
+                          className={isLead ? 'cardDetail readerLead' : 'cardDetail'}>
                           {para}
-                        </h3>
+                        </p>
                       );
-                    }
-                    const isLead = !seenBody;
-                    seenBody = true;
-                    return (
-                      <p
-                        key={`reader-p-${index}`}
-                        className={isLead ? 'cardDetail readerLead' : 'cardDetail'}>
-                        {para}
-                      </p>
-                    );
-                  },
-                );
-              })()
+                    },
+                  );
+                })()}
+              </div>
             )}
             {readerItem.audioUrl ? <AudioPlayer src={readerItem.audioUrl} /> : null}
             {readerItem.webUrl ? (
