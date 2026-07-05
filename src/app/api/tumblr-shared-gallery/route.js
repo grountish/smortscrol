@@ -171,6 +171,13 @@ function extractPostImageUrls(post) {
   return Array.from(urls);
 }
 
+function stripRawUrls(text) {
+  return String(text || '')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function normalizeForComparison(text) {
   return String(text || '')
     .replace(/<[^>]+>/g, ' ')
@@ -283,15 +290,15 @@ export async function GET(request) {
       return [];
     }
 
-    const title = post?.summary || post?.blog_name || 'Tumblr post';
-    const detail = extractTextSnippet(post);
+    const title = stripRawUrls(post?.summary) || post?.blog_name || 'Tumblr post';
+    const detail = stripRawUrls(extractTextSnippet(post));
     const normalizedTitle = normalizeForComparison(title);
     const normalizedDetail = normalizeForComparison(detail);
     const displayDetail = normalizedTitle && normalizedTitle === normalizedDetail ? '' : detail;
     const webUrl = post?.post_url || post?.short_url || null;
 
     return imageUrls.map((imageUrl, index) => ({
-      id: `tumblr-gallery-${post?.id || 'post'}-${index}`,
+      id: post?.id ? `tumblr-gallery-${post.id}-${index}` : `tumblr-gallery-${imageUrl}`,
       title,
       detail: displayDetail,
       tag: '-',

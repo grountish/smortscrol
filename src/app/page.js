@@ -371,11 +371,20 @@ function mergeItems(currentItems, nextItems) {
   }
 
   const seen = new Set(currentItems.map((item) => item.id));
+  const seenImages = new Set(
+    currentItems.map((item) => item.imageUrl).filter(Boolean),
+  );
   const uniqueNext = nextItems.filter((item) => {
     if (!item?.id || seen.has(item.id)) {
       return false;
     }
+    if (item.imageUrl && seenImages.has(item.imageUrl)) {
+      return false;
+    }
     seen.add(item.id);
+    if (item.imageUrl) {
+      seenImages.add(item.imageUrl);
+    }
     return true;
   });
   return [...currentItems, ...uniqueNext];
@@ -1455,7 +1464,7 @@ export default function HomePage() {
 
         const items = (Array.isArray(payload?.items) ? payload.items : []).map((item, index) => ({
           ...item,
-          id: item?.id || `tumblr-gallery-${offset + index}`,
+          id: item?.id || `tumblr-gallery-${item?.imageUrl || offset + index}`,
           source: targetCategory,
           tag: item?.tag || `- - ${CATEGORY_LABELS[targetCategory]}`,
         }));
@@ -1506,8 +1515,8 @@ export default function HomePage() {
         const safeOffset = offset < orderedFileNames.length ? offset : 0;
 
         const slice = orderedFileNames.slice(safeOffset, safeOffset + PAGE_SIZE_ART);
-        const items = slice.map((fileName, index) => ({
-          id: `local-gallery-${safeOffset + index}-${fileName}`,
+        const items = slice.map((fileName) => ({
+          id: `local-gallery-${fileName}`,
           source: targetCategory,
           title: '',
           detail: '',
@@ -1876,7 +1885,13 @@ export default function HomePage() {
           ...Array.from(seenIdsRef.current),
           ...seenItemsRef.current.map((item) => item.id),
         ]);
-        const unseenItems = nextItems.filter((item) => !previouslySeenIds.has(item.id));
+        const previouslySeenImageUrls = new Set(
+          seenItemsRef.current.map((item) => item.imageUrl).filter(Boolean),
+        );
+        const isPreviouslySeen = (item) =>
+          previouslySeenIds.has(item.id) ||
+          (item.imageUrl && previouslySeenImageUrls.has(item.imageUrl));
+        const unseenItems = nextItems.filter((item) => !isPreviouslySeen(item));
         const candidateItems = unseenItems.length ? unseenItems : nextItems;
         let itemsToAdd = candidateItems.slice(0, LOAD_MORE_BATCH_MAX);
 
@@ -1908,7 +1923,9 @@ export default function HomePage() {
               const existingIds = new Set(selectedFeedItems.map((item) => item.id));
               const shortage = requiredTumblrSlots - selectedTumblrCount;
               const extraTumblrItems = (Array.isArray(tumblrBatch?.items) ? tumblrBatch.items : [])
-                .filter((item) => item?.id && !existingIds.has(item.id))
+                .filter(
+                  (item) => item?.id && !existingIds.has(item.id) && !isPreviouslySeen(item),
+                )
                 .slice(0, shortage);
 
               if (extraTumblrItems.length) {
@@ -1959,7 +1976,9 @@ export default function HomePage() {
               const existingIds = new Set(selectedFeedItems.map((item) => item.id));
               const shortage = requiredLocalSlots - selectedLocalCount;
               const extraLocalItems = (Array.isArray(localBatch?.items) ? localBatch.items : [])
-                .filter((item) => item?.id && !existingIds.has(item.id))
+                .filter(
+                  (item) => item?.id && !existingIds.has(item.id) && !isPreviouslySeen(item),
+                )
                 .slice(0, shortage);
 
               if (extraLocalItems.length) {

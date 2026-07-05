@@ -799,6 +799,7 @@ body[data-theme='paper'] {
         margin: 8px 0 0;
         font-size: 21px;
         color: var(--ink);
+        overflow-wrap: anywhere;
 }
 
 .cardDetail {
@@ -806,6 +807,7 @@ body[data-theme='paper'] {
         font-size: 15px;
         line-height: 1.5;
         color: var(--detail);
+        overflow-wrap: anywhere;
 }
 
 .cardHint {
