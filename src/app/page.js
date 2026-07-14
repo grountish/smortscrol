@@ -72,7 +72,15 @@ const PAGE_SIZE = 15;
 const PAGE_SIZE_ART = 10;
 const PAGE_SIZE_MUSIC = 8;
 const LOAD_MORE_BATCH_MAX = 7;
-const ART_CURATED_BATCH = 12;
+const ART_CURATED_BATCH = 6;
+// Keep a background buffer of already-fetched, unseen candidates so most
+// load-more calls can be served instantly without hitting the network.
+const FEED_BUFFER_TARGET = LOAD_MORE_BATCH_MAX * 3;
+// Abort any single external request that stalls, so one slow API can't hold
+// up a whole batch. Empty/aborted sources are simply skipped.
+const FETCH_TIMEOUT_MS = 7000;
+// In-memory TTL for idempotent GETs (search id-lists, wiki summaries, etc.).
+const API_CACHE_TTL_MS = 10 * 60 * 1000;
 const CONTROL_ICON_SIZE = 16;
 const AVERAGE_READING_WPM = 220;
 const WIKI_PAGE_SIZE = 6;
@@ -465,6 +473,48 @@ async function parseJsonResponse(response, fallbackMessage) {
   }
 }
 
+// fetch() that aborts after timeoutMs so a stalled external API can't block a
+// whole batch. Falls back to plain fetch where AbortController is unavailable.
+async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  if (typeof AbortController === 'undefined') {
+    return fetch(url, options);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchJson(url, fallbackMessage, options = {}) {
+  const response = await fetchWithTimeout(url, options);
+  return parseJsonResponse(response, fallbackMessage || 'Received a non-JSON response.');
+}
+
+// Session-scoped, size-bounded cache for idempotent GETs (search id-lists,
+// wiki summaries) whose payloads don't change within a browsing session.
+const API_JSON_CACHE = new Map();
+const API_JSON_CACHE_MAX = 300;
+
+async function fetchJsonCached(url, fallbackMessage, ttlMs = API_CACHE_TTL_MS) {
+  const now = Date.now();
+  const hit = API_JSON_CACHE.get(url);
+  if (hit && now - hit.at < ttlMs) {
+    return hit.value;
+  }
+
+  const value = await fetchJson(url, fallbackMessage);
+  API_JSON_CACHE.set(url, { at: now, value });
+  if (API_JSON_CACHE.size > API_JSON_CACHE_MAX) {
+    const oldestKey = API_JSON_CACHE.keys().next().value;
+    API_JSON_CACHE.delete(oldestKey);
+  }
+  return value;
+}
+
 async function mapInBatches(items, batchSize, mapper) {
   const results = [];
   const safeBatchSize = Math.max(1, batchSize);
@@ -725,6 +775,15 @@ export default function HomePage() {
   const [breathOverlaySource, setBreathOverlaySource] = useState(null);
 
   const inFlightRef = useRef({});
+  // Background pool of already-fetched, unseen feed candidates. Drained by
+  // load-more (instant, no network) and refilled by the idle prefetch.
+  const feedBufferRef = useRef([]);
+  const prefetchInFlightRef = useRef(false);
+  // Latest committed state mirrored into refs so loadMore/fetchBatch can read
+  // them without listing them as deps — keeps those callbacks stable so the
+  // load-more observer stops tearing down and rebuilding on every batch.
+  const itemsByCategoryRef = useRef({});
+  const cursorByCategoryRef = useRef({});
   const seenIdsRef = useRef(new Set());
   const seenItemsRef = useRef([]);
   const favoriteIdsRef = useRef(new Set());
@@ -754,6 +813,14 @@ export default function HomePage() {
   const breathAudioRef = useRef(null);
   const breathCircleRef = useRef(null);
   const hasLoadedThemeRef = useRef(false);
+
+  useEffect(() => {
+    itemsByCategoryRef.current = itemsByCategory;
+  }, [itemsByCategory]);
+
+  useEffect(() => {
+    cursorByCategoryRef.current = cursorByCategory;
+  }, [cursorByCategory]);
 
   const items = useMemo(() => itemsByCategory[category] || [], [itemsByCategory, category]);
 
@@ -806,6 +873,12 @@ export default function HomePage() {
 
   useEffect(() => {
     const activeSet = new Set(activeFeedSources);
+    // Drop buffered candidates whose source was just disabled.
+    if (feedBufferRef.current.length) {
+      feedBufferRef.current = feedBufferRef.current.filter((item) =>
+        activeSet.has(getItemSource(item)),
+      );
+    }
     setItemsByCategory((prev) => {
       const feed = prev.feed;
       if (!Array.isArray(feed) || !feed.length) {
@@ -1127,13 +1200,10 @@ export default function HomePage() {
   }, [queueSeenSave]);
 
   const fetchWikiFullText = useCallback(async (title) => {
-    const response = await fetch(
+    const json = await fetchJsonCached(
       `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&format=json&titles=${encodeURIComponent(
         title,
       )}&origin=*`,
-    );
-    const json = await parseJsonResponse(
-      response,
       'Wikipedia returned a non-JSON response while loading full text.',
     );
     const pages = json?.query?.pages;
@@ -1224,47 +1294,38 @@ export default function HomePage() {
           const idSet = new Set();
 
           const curatedTerms = shuffleArray(curatedArtTerms).slice(0, ART_CURATED_BATCH);
-          const curatedHighlightRequests = curatedTerms.map((term) =>
-            fetch(
+          const searchUrls = [ART_QUERY, ...curatedTerms].map(
+            (term) =>
               `https://collectionapi.metmuseum.org/public/collection/v1/search?hasImages=true&isHighlight=true&artistOrCulture=true&q=${encodeURIComponent(
                 term,
               )}`,
-            ),
           );
 
-          const baseHighlightRequest = fetch(
-            `https://collectionapi.metmuseum.org/public/collection/v1/search?hasImages=true&isHighlight=true&artistOrCulture=true&q=${encodeURIComponent(
-              ART_QUERY,
-            )}`,
-          );
-
-          const highlightResponses = await Promise.all([
-            baseHighlightRequest,
-            ...curatedHighlightRequests,
-          ]);
+          // Search id-lists are stable within a session; cache them so repeat
+          // loads skip the fan-out entirely. One failed search no longer
+          // rejects the whole batch.
           const highlightJson = await Promise.all(
-            highlightResponses.map((response) =>
-              parseJsonResponse(response, 'The Met returned a non-JSON search response.'),
+            searchUrls.map((url) =>
+              fetchJsonCached(url, 'The Met returned a non-JSON search response.').catch(
+                () => null,
+              ),
             ),
           );
 
           highlightJson.forEach((entry) => {
-            if (Array.isArray(entry.objectIDs)) {
+            if (Array.isArray(entry?.objectIDs)) {
               entry.objectIDs.forEach((id) => idSet.add(id));
             }
           });
 
           if (!idSet.size) {
-            const search = await fetch(
+            const searchJson = await fetchJsonCached(
               `https://collectionapi.metmuseum.org/public/collection/v1/search?hasImages=true&q=${encodeURIComponent(
                 ART_QUERY,
               )}`,
-            );
-            const searchJson = await parseJsonResponse(
-              search,
               'The Met returned a non-JSON fallback search response.',
-            );
-            if (Array.isArray(searchJson.objectIDs)) {
+            ).catch(() => null);
+            if (Array.isArray(searchJson?.objectIDs)) {
               searchJson.objectIDs.forEach((id) => idSet.add(id));
             }
           }
@@ -1302,17 +1363,17 @@ export default function HomePage() {
               break;
             }
 
-            const detailRequests = slice.map((id) =>
-              fetch(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${id}`),
-            );
-            const detailResponses = await Promise.all(detailRequests);
             const detailJson = await Promise.all(
-              detailResponses.map((response) =>
-                parseJsonResponse(response, 'The Met returned a non-JSON object response.'),
+              slice.map((id) =>
+                fetchJsonCached(
+                  `https://collectionapi.metmuseum.org/public/collection/v1/objects/${id}`,
+                  'The Met returned a non-JSON object response.',
+                ).catch(() => null),
               ),
             );
 
             const categoryItems = detailJson
+              .filter(Boolean)
               .map((item) => ({
                 id: `art-${item.objectID}`,
                 source: targetCategory,
@@ -1358,14 +1419,10 @@ export default function HomePage() {
 
         const fetchAicItems = async (aicPage) => {
           const page = Number.isFinite(aicPage) && aicPage > 0 ? aicPage : 1;
-          const response = await fetch(
+          const json = await fetchJsonCached(
             `https://api.artic.edu/api/v1/artworks/search?q=${encodeURIComponent(
               ART_QUERY,
             )}&query[term][is_public_domain]=true&page=${page}&limit=${PAGE_SIZE_ART}&fields=id,title,artist_display,date_display,medium_display,image_id`,
-          );
-
-          const json = await parseJsonResponse(
-            response,
             'The Art Institute of Chicago returned a non-JSON response.',
           );
           const iiifBase = json?.config?.iiif_url || 'https://www.artic.edu/iiif/2';
@@ -1402,7 +1459,7 @@ export default function HomePage() {
           };
         };
 
-        const storedArtCursor = cursorByCategory[targetCategory] || {};
+        const storedArtCursor = cursorByCategoryRef.current[targetCategory] || {};
         const metCursor = storedArtCursor.met || storedArtCursor;
         const aicPage = storedArtCursor.aic?.page || 1;
 
@@ -1443,13 +1500,13 @@ export default function HomePage() {
       }
 
       if (targetCategory === 'tumblr-gallery') {
-        const tumblrCursor = cursorByCategory[targetCategory] || { offset: 0 };
+        const tumblrCursor = cursorByCategoryRef.current[targetCategory] || { offset: 0 };
         const offset =
           Number.isFinite(tumblrCursor?.offset) && tumblrCursor.offset >= 0
             ? tumblrCursor.offset
             : 0;
 
-        const response = await fetch(
+        const response = await fetchWithTimeout(
           `/api/tumblr-shared-gallery?offset=${offset}&limit=${PAGE_SIZE_ART}`,
           { cache: 'no-store' },
         );
@@ -1483,12 +1540,14 @@ export default function HomePage() {
       }
 
       if (targetCategory === 'local-gallery') {
-        const localCursor = cursorByCategory[targetCategory] || { offset: 0, seed: 0 };
+        const localCursor = cursorByCategoryRef.current[targetCategory] || { offset: 0, seed: 0 };
         const offset =
           Number.isFinite(localCursor?.offset) && localCursor.offset >= 0 ? localCursor.offset : 0;
         const initialSeed = normalizeSeed(localCursor?.seed) || normalizeSeed(Math.random() * 1e9);
 
-        const response = await fetch('/assets/local-gallery/manifest.json', { cache: 'no-store' });
+        const response = await fetchWithTimeout('/assets/local-gallery/manifest.json', {
+          cache: 'no-store',
+        });
         const payload = await parseJsonResponse(
           response,
           'The local gallery manifest returned a non-JSON response.',
@@ -1543,13 +1602,10 @@ export default function HomePage() {
       }
 
       if (targetCategory === 'music-world') {
-        const searchResponse = await fetch(
+        const searchJson = await fetchJson(
           `https://archive.org/advancedsearch.php?q=${encodeURIComponent(
             MUSIC_QUERY,
           )}&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=year&rows=${PAGE_SIZE_MUSIC}&sort[]=random&output=json`,
-        );
-        const searchJson = await parseJsonResponse(
-          searchResponse,
           'Internet Archive returned a non-JSON search response.',
         );
 
@@ -1561,11 +1617,8 @@ export default function HomePage() {
             return null;
           }
 
-          const metaResponse = await fetch(
+          const metaJson = await fetchJsonCached(
             `https://archive.org/metadata/${encodeURIComponent(identifier)}`,
-          );
-          const metaJson = await parseJsonResponse(
-            metaResponse,
             'Internet Archive returned a non-JSON metadata response.',
           ).catch(() => null);
 
@@ -1620,7 +1673,7 @@ export default function HomePage() {
 
       if (targetCategory === 'philosophy') {
         const baseOrder = PHILOSOPHER_NAMES;
-        const previousCursor = cursorByCategory[targetCategory] || {};
+        const previousCursor = cursorByCategoryRef.current[targetCategory] || {};
         const initialIndex = Number.isFinite(previousCursor.index)
           ? previousCursor.index
           : Math.floor(Math.random() * baseOrder.length);
@@ -1637,17 +1690,17 @@ export default function HomePage() {
         const summaries = await mapInBatches(
           selectedNames,
           WIKI_SUMMARY_BATCH_SIZE,
-          async (name) => {
-            const response = await fetch(
+          async (name) =>
+            fetchJsonCached(
               `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(name)}`,
-            );
-            return parseJsonResponse(response, 'Wikipedia returned a non-JSON summary response.');
-          },
+              'Wikipedia returned a non-JSON summary response.',
+            ).catch(() => null),
         );
 
         const items = summaries
           .filter(
-            (item) => item?.type !== 'https://mediawiki.org/wiki/HyperSwitch/errors/not_found',
+            (item) =>
+              item && item.type !== 'https://mediawiki.org/wiki/HyperSwitch/errors/not_found',
           )
           .map((item, index) => ({
             id: `${targetCategory}-${item.pageid || selectedNames[index].toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
@@ -1676,13 +1729,10 @@ export default function HomePage() {
           normalizeTopicLabel(targetCategory);
 
         const fetchWikiSummaries = async (topic, offset) => {
-          const searchResponse = await fetch(
+          const searchJson = await fetchJsonCached(
             `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
               topic,
             )}&format=json&srlimit=${WIKI_PAGE_SIZE}&sroffset=${offset}&origin=*`,
-          );
-          const searchJson = await parseJsonResponse(
-            searchResponse,
             'Wikipedia returned a non-JSON search response.',
           );
           const titles = shuffleArray(
@@ -1692,16 +1742,15 @@ export default function HomePage() {
           const summaries = await mapInBatches(
             titles,
             WIKI_SUMMARY_BATCH_SIZE,
-            async (title) => {
-              const response = await fetch(
+            async (title) =>
+              fetchJsonCached(
                 `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
-              );
-              return parseJsonResponse(response, 'Wikipedia returned a non-JSON summary response.');
-            },
+                'Wikipedia returned a non-JSON summary response.',
+              ).catch(() => null),
           );
 
           return {
-            items: summaries.map((item) => ({
+            items: summaries.filter(Boolean).map((item) => ({
               id: `${targetCategory}-${item.pageid}`,
               source: targetCategory,
               title: item.title,
@@ -1717,7 +1766,7 @@ export default function HomePage() {
         };
 
         const searchTopic = customTopic?.query || WIKI_SEARCH[targetCategory];
-        const wikiCursor = cursorByCategory[targetCategory] || {
+        const wikiCursor = cursorByCategoryRef.current[targetCategory] || {
           offset: Math.floor(Math.random() * (WIKI_RANDOM_START_MAX + 1)),
         };
         const initialOffset = Number.isFinite(wikiCursor.offset) ? wikiCursor.offset : 0;
@@ -1745,9 +1794,9 @@ export default function HomePage() {
         };
       }
 
-      return { items: [], cursor: cursorByCategory[targetCategory] };
+      return { items: [], cursor: cursorByCategoryRef.current[targetCategory] };
     },
-    [cursorByCategory, customTopicsByKey],
+    [customTopicsByKey],
   );
 
   const getNextFeedSources = useCallback(() => {
@@ -1793,10 +1842,275 @@ export default function HomePage() {
     return batch;
   }, [activeFeedSources]);
 
+  // Fresh predicate over the current seen id/image sets. Built once per call
+  // (refs are stable, so no dep churn).
+  const buildSeenPredicate = useCallback(() => {
+    const seenIds = new Set([
+      ...Array.from(seenIdsRef.current),
+      ...seenItemsRef.current.map((item) => item.id),
+    ]);
+    const seenImageUrls = new Set(
+      seenItemsRef.current.map((item) => item.imageUrl).filter(Boolean),
+    );
+    return (item) =>
+      !!item &&
+      (seenIds.has(item.id) || (item.imageUrl && seenImageUrls.has(item.imageUrl)));
+  }, []);
+
+  // Network fan-out only: pull batches until we have variety + enough raw items,
+  // commit cursor advances, and return the unseen candidate pool. Shared by the
+  // critical-path load and the background prefetch.
+  const gatherFeedCandidates = useCallback(async () => {
+    if (!activeFeedSources.length) {
+      throw new Error('Enable at least one topic to load your feed.');
+    }
+
+    const collectedBatches = [];
+    const cursorUpdates = [];
+    let rawItems = [];
+    let attempts = 0;
+
+    while (
+      (collectedBatches.length < 2 || rawItems.length < PAGE_SIZE) &&
+      attempts < activeFeedSources.length * 2
+    ) {
+      const sourceBatch = getNextFeedSources();
+      if (!sourceBatch.length) {
+        break;
+      }
+
+      const settled = await Promise.allSettled(sourceBatch.map((source) => fetchBatch(source)));
+      const successful = settled
+        .map((result, index) => ({ result, source: sourceBatch[index] }))
+        .filter(
+          (entry) =>
+            entry.result.status === 'fulfilled' &&
+            Array.isArray(entry.result.value.items) &&
+            entry.result.value.items.length,
+        );
+
+      if (!successful.length) {
+        const rejected = settled.find((entry) => entry.status === 'rejected');
+        if (rejected) {
+          throw rejected.reason || new Error('Could not fetch feed sources.');
+        }
+      }
+
+      successful.forEach((entry) => {
+        const batch = entry.result.value;
+        collectedBatches.push(batch.items);
+        if (batch.cursor) {
+          cursorUpdates.push({ source: entry.source, cursor: batch.cursor });
+        }
+      });
+
+      rawItems = shuffleArray(interleave(collectedBatches));
+      attempts += 1;
+    }
+
+    if (!collectedBatches.length || !rawItems.length) {
+      throw new Error('Could not fetch feed sources.');
+    }
+
+    if (cursorUpdates.length) {
+      setCursorByCategory((prev) => {
+        const updates = { ...prev };
+        cursorUpdates.forEach((entry) => {
+          updates[entry.source] = entry.cursor;
+        });
+        return updates;
+      });
+    }
+
+    const isPreviouslySeen = buildSeenPredicate();
+    const unseen = rawItems.filter((item) => !isPreviouslySeen(item));
+    return unseen.length ? unseen : rawItems;
+  }, [activeFeedSources, buildSeenPredicate, fetchBatch, getNextFeedSources]);
+
+  // Turn a candidate pool into the arranged batch to display, honoring the
+  // Tumblr/local cadence, and return the untouched remainder for the buffer.
+  const buildFeedBatch = useCallback(
+    async (pool, existingFeedCount) => {
+      const isPreviouslySeen = buildSeenPredicate();
+      let selectedFeedItems = pickBalancedFeedItems(pool, LOAD_MORE_BATCH_MAX);
+
+      const requiredTumblrSlots = countCadenceSlots(
+        existingFeedCount,
+        selectedFeedItems.length,
+        TUMBLR_INSERT_EVERY,
+      );
+      const selectedTumblrCount = selectedFeedItems.filter(
+        (item) => getItemSource(item) === TUMBLR_SOURCE_KEY,
+      ).length;
+
+      if (enabledSources.has(TUMBLR_SOURCE_KEY) && requiredTumblrSlots > selectedTumblrCount) {
+        try {
+          const tumblrBatch = await fetchBatch(TUMBLR_SOURCE_KEY);
+          if (tumblrBatch?.cursor) {
+            setCursorByCategory((prev) => ({
+              ...prev,
+              [TUMBLR_SOURCE_KEY]: tumblrBatch.cursor,
+            }));
+          }
+
+          const existingIds = new Set(selectedFeedItems.map((item) => item.id));
+          const shortage = requiredTumblrSlots - selectedTumblrCount;
+          const extraTumblrItems = (Array.isArray(tumblrBatch?.items) ? tumblrBatch.items : [])
+            .filter((item) => item?.id && !existingIds.has(item.id) && !isPreviouslySeen(item))
+            .slice(0, shortage);
+
+          if (extraTumblrItems.length) {
+            const tumblrItems = selectedFeedItems.filter(
+              (item) => getItemSource(item) === TUMBLR_SOURCE_KEY,
+            );
+            const nonTumblrItems = selectedFeedItems.filter(
+              (item) => getItemSource(item) !== TUMBLR_SOURCE_KEY,
+            );
+            const nonTumblrKeepCount = Math.max(0, nonTumblrItems.length - extraTumblrItems.length);
+
+            selectedFeedItems = [
+              ...tumblrItems,
+              ...extraTumblrItems,
+              ...nonTumblrItems.slice(0, nonTumblrKeepCount),
+            ].slice(0, selectedFeedItems.length);
+          }
+        } catch {
+          // Ignore supplemental Tumblr fetch failures; feed still loads.
+        }
+      }
+
+      const requiredLocalSlots = countCadenceSlots(
+        existingFeedCount,
+        selectedFeedItems.length,
+        LOCAL_GALLERY_INSERT_EVERY,
+      );
+      const selectedLocalCount = selectedFeedItems.filter(
+        (item) => getItemSource(item) === LOCAL_GALLERY_SOURCE_KEY,
+      ).length;
+
+      if (enabledSources.has(LOCAL_GALLERY_SOURCE_KEY) && requiredLocalSlots > selectedLocalCount) {
+        try {
+          const localBatch = await fetchBatch(LOCAL_GALLERY_SOURCE_KEY);
+          if (localBatch?.cursor) {
+            setCursorByCategory((prev) => ({
+              ...prev,
+              [LOCAL_GALLERY_SOURCE_KEY]: localBatch.cursor,
+            }));
+          }
+
+          const existingIds = new Set(selectedFeedItems.map((item) => item.id));
+          const shortage = requiredLocalSlots - selectedLocalCount;
+          const extraLocalItems = (Array.isArray(localBatch?.items) ? localBatch.items : [])
+            .filter((item) => item?.id && !existingIds.has(item.id) && !isPreviouslySeen(item))
+            .slice(0, shortage);
+
+          if (extraLocalItems.length) {
+            const localItems = selectedFeedItems.filter(
+              (item) => getItemSource(item) === LOCAL_GALLERY_SOURCE_KEY,
+            );
+            const nonLocalItems = selectedFeedItems.filter(
+              (item) => getItemSource(item) !== LOCAL_GALLERY_SOURCE_KEY,
+            );
+            const nonLocalKeepCount = Math.max(0, nonLocalItems.length - extraLocalItems.length);
+
+            selectedFeedItems = [
+              ...localItems,
+              ...extraLocalItems,
+              ...nonLocalItems.slice(0, nonLocalKeepCount),
+            ].slice(0, selectedFeedItems.length);
+          }
+        } catch {
+          // Ignore supplemental local gallery fetch failures; feed still loads.
+        }
+      }
+
+      const arranged = arrangeFeedWithCadence(selectedFeedItems, existingFeedCount);
+      const usedIds = new Set(arranged.map((item) => item.id));
+      const rest = pool.filter((item) => item?.id && !usedIds.has(item.id));
+      return { arranged, rest };
+    },
+    [buildSeenPredicate, enabledSources, fetchBatch],
+  );
+
+  // Refill the candidate buffer in the background during idle time so the next
+  // load-more is served instantly without waiting on the network.
+  const schedulePrefetch = useCallback(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    // Note: don't gate on inFlightRef.current.feed here — loadMore calls this
+    // while still in-flight; the inner run() (deferred to idle) re-checks it.
+    if (prefetchInFlightRef.current) {
+      return;
+    }
+    if (feedBufferRef.current.length >= FEED_BUFFER_TARGET) {
+      return;
+    }
+    if (!activeFeedSources.length) {
+      return;
+    }
+
+    const run = async () => {
+      if (prefetchInFlightRef.current || inFlightRef.current.feed) {
+        return;
+      }
+      if (feedBufferRef.current.length >= FEED_BUFFER_TARGET) {
+        return;
+      }
+
+      prefetchInFlightRef.current = true;
+      try {
+        const candidates = await gatherFeedCandidates();
+        const existingIds = new Set([
+          ...feedBufferRef.current.map((item) => item.id),
+          ...(itemsByCategoryRef.current.feed || []).map((item) => item.id),
+        ]);
+        const fresh = candidates.filter((item) => item?.id && !existingIds.has(item.id));
+        if (fresh.length) {
+          feedBufferRef.current = [...feedBufferRef.current, ...fresh];
+        }
+      } catch {
+        // Prefetch failures are silent; the next load retries on the critical path.
+      } finally {
+        prefetchInFlightRef.current = false;
+      }
+    };
+
+    const idle = window.requestIdleCallback || ((cb) => window.setTimeout(() => cb(), 300));
+    idle(run);
+  }, [activeFeedSources.length, gatherFeedCandidates]);
+
   const loadMore = useCallback(
     async (targetCategory) => {
       if (inFlightRef.current[targetCategory]) {
         return;
+      }
+
+      // Feed fast path: drain the prefetched buffer, no critical-path network.
+      if (targetCategory === 'feed') {
+        const buffered = feedBufferRef.current.filter(
+          (item) => !seenIdsRef.current.has(item.id),
+        );
+        if (buffered.length >= LOAD_MORE_BATCH_MAX) {
+          inFlightRef.current.feed = true;
+          try {
+            const existingFeedCount = (itemsByCategoryRef.current.feed || []).filter(
+              (item) => !seenIdsRef.current.has(item.id),
+            ).length;
+            const { arranged, rest } = await buildFeedBatch(buffered, existingFeedCount);
+            feedBufferRef.current = rest;
+            if (arranged.length) {
+              setItemsByCategory((prev) => {
+                const merged = mergeItems(prev.feed || [], arranged);
+                return { ...prev, feed: merged.slice(-200) };
+              });
+            }
+          } finally {
+            inFlightRef.current.feed = false;
+          }
+          schedulePrefetch();
+          return;
+        }
       }
 
       inFlightRef.current[targetCategory] = true;
@@ -1804,74 +2118,24 @@ export default function HomePage() {
       setErrorByCategory((prev) => ({ ...prev, [targetCategory]: null }));
 
       try {
-        let nextItems = [];
-
         if (targetCategory === 'feed') {
-          if (!activeFeedSources.length) {
-            throw new Error('Enable at least one topic to load your feed.');
-          }
-
-          const collectedBatches = [];
-          const cursorUpdates = [];
-          let attempts = 0;
-
-          // Pull multiple batches until we have variety and a reasonable number of items.
-          while (
-            (collectedBatches.length < 2 || nextItems.length < PAGE_SIZE) &&
-            attempts < activeFeedSources.length * 2
-          ) {
-            const sourceBatch = getNextFeedSources();
-            if (!sourceBatch.length) {
-              break;
-            }
-
-            const settled = await Promise.allSettled(
-              sourceBatch.map((source) => fetchBatch(source)),
-            );
-            const successful = settled
-              .map((result, index) => ({ result, source: sourceBatch[index] }))
-              .filter(
-                (entry) =>
-                  entry.result.status === 'fulfilled' &&
-                  Array.isArray(entry.result.value.items) &&
-                  entry.result.value.items.length,
-              );
-
-            if (!successful.length) {
-              const rejected = settled.find((entry) => entry.status === 'rejected');
-              if (rejected) {
-                throw rejected.reason || new Error('Could not fetch feed sources.');
-              }
-            }
-
-            successful.forEach((entry) => {
-              const batch = entry.result.value;
-              collectedBatches.push(batch.items);
-              if (batch.cursor) {
-                cursorUpdates.push({ source: entry.source, cursor: batch.cursor });
-              }
-            });
-
-            nextItems = shuffleArray(interleave(collectedBatches));
-            attempts += 1;
-          }
-
-          if (!collectedBatches.length || !nextItems.length) {
-            throw new Error('Could not fetch feed sources.');
-          }
-
-          if (cursorUpdates.length) {
-            setCursorByCategory((prev) => {
-              const updates = { ...prev };
-              cursorUpdates.forEach((entry) => {
-                updates[entry.source] = entry.cursor;
-              });
-              return updates;
+          const candidates = await gatherFeedCandidates();
+          const pool = [...feedBufferRef.current, ...candidates];
+          const existingFeedCount = (itemsByCategoryRef.current.feed || []).filter(
+            (item) => !seenIdsRef.current.has(item.id),
+          ).length;
+          const { arranged, rest } = await buildFeedBatch(pool, existingFeedCount);
+          feedBufferRef.current = rest;
+          if (arranged.length) {
+            setItemsByCategory((prev) => {
+              const merged = mergeItems(prev.feed || [], arranged);
+              return { ...prev, feed: merged.slice(-200) };
             });
           }
+          schedulePrefetch();
         } else {
           const batch = await fetchBatch(targetCategory);
-          nextItems = batch.items;
+          const nextItems = batch.items;
 
           if (batch.cursor) {
             setCursorByCategory((prev) => ({
@@ -1879,143 +2143,17 @@ export default function HomePage() {
               [targetCategory]: batch.cursor,
             }));
           }
+
+          const isPreviouslySeen = buildSeenPredicate();
+          const unseenItems = nextItems.filter((item) => !isPreviouslySeen(item));
+          const candidateItems = unseenItems.length ? unseenItems : nextItems;
+          const itemsToAdd = candidateItems.slice(0, LOAD_MORE_BATCH_MAX);
+
+          setItemsByCategory((prev) => {
+            const merged = mergeItems(prev[targetCategory] || [], itemsToAdd);
+            return { ...prev, [targetCategory]: merged };
+          });
         }
-
-        const previouslySeenIds = new Set([
-          ...Array.from(seenIdsRef.current),
-          ...seenItemsRef.current.map((item) => item.id),
-        ]);
-        const previouslySeenImageUrls = new Set(
-          seenItemsRef.current.map((item) => item.imageUrl).filter(Boolean),
-        );
-        const isPreviouslySeen = (item) =>
-          previouslySeenIds.has(item.id) ||
-          (item.imageUrl && previouslySeenImageUrls.has(item.imageUrl));
-        const unseenItems = nextItems.filter((item) => !isPreviouslySeen(item));
-        const candidateItems = unseenItems.length ? unseenItems : nextItems;
-        let itemsToAdd = candidateItems.slice(0, LOAD_MORE_BATCH_MAX);
-
-        if (targetCategory === 'feed') {
-          const existingFeedCount = (itemsByCategory.feed || []).filter(
-            (item) => !seenIdsRef.current.has(item.id),
-          ).length;
-          let selectedFeedItems = pickBalancedFeedItems(candidateItems, LOAD_MORE_BATCH_MAX);
-
-          const requiredTumblrSlots = countCadenceSlots(
-            existingFeedCount,
-            selectedFeedItems.length,
-            TUMBLR_INSERT_EVERY,
-          );
-          const selectedTumblrCount = selectedFeedItems.filter(
-            (item) => getItemSource(item) === TUMBLR_SOURCE_KEY,
-          ).length;
-
-          if (enabledSources.has(TUMBLR_SOURCE_KEY) && requiredTumblrSlots > selectedTumblrCount) {
-            try {
-              const tumblrBatch = await fetchBatch(TUMBLR_SOURCE_KEY);
-              if (tumblrBatch?.cursor) {
-                setCursorByCategory((prev) => ({
-                  ...prev,
-                  [TUMBLR_SOURCE_KEY]: tumblrBatch.cursor,
-                }));
-              }
-
-              const existingIds = new Set(selectedFeedItems.map((item) => item.id));
-              const shortage = requiredTumblrSlots - selectedTumblrCount;
-              const extraTumblrItems = (Array.isArray(tumblrBatch?.items) ? tumblrBatch.items : [])
-                .filter(
-                  (item) => item?.id && !existingIds.has(item.id) && !isPreviouslySeen(item),
-                )
-                .slice(0, shortage);
-
-              if (extraTumblrItems.length) {
-                const tumblrItems = selectedFeedItems.filter(
-                  (item) => getItemSource(item) === TUMBLR_SOURCE_KEY,
-                );
-                const nonTumblrItems = selectedFeedItems.filter(
-                  (item) => getItemSource(item) !== TUMBLR_SOURCE_KEY,
-                );
-                const nonTumblrKeepCount = Math.max(
-                  0,
-                  nonTumblrItems.length - extraTumblrItems.length,
-                );
-
-                selectedFeedItems = [
-                  ...tumblrItems,
-                  ...extraTumblrItems,
-                  ...nonTumblrItems.slice(0, nonTumblrKeepCount),
-                ].slice(0, selectedFeedItems.length);
-              }
-            } catch {
-              // Ignore supplemental Tumblr fetch failures; feed still loads.
-            }
-          }
-
-          const requiredLocalSlots = countCadenceSlots(
-            existingFeedCount,
-            selectedFeedItems.length,
-            LOCAL_GALLERY_INSERT_EVERY,
-          );
-          const selectedLocalCount = selectedFeedItems.filter(
-            (item) => getItemSource(item) === LOCAL_GALLERY_SOURCE_KEY,
-          ).length;
-
-          if (
-            enabledSources.has(LOCAL_GALLERY_SOURCE_KEY) &&
-            requiredLocalSlots > selectedLocalCount
-          ) {
-            try {
-              const localBatch = await fetchBatch(LOCAL_GALLERY_SOURCE_KEY);
-              if (localBatch?.cursor) {
-                setCursorByCategory((prev) => ({
-                  ...prev,
-                  [LOCAL_GALLERY_SOURCE_KEY]: localBatch.cursor,
-                }));
-              }
-
-              const existingIds = new Set(selectedFeedItems.map((item) => item.id));
-              const shortage = requiredLocalSlots - selectedLocalCount;
-              const extraLocalItems = (Array.isArray(localBatch?.items) ? localBatch.items : [])
-                .filter(
-                  (item) => item?.id && !existingIds.has(item.id) && !isPreviouslySeen(item),
-                )
-                .slice(0, shortage);
-
-              if (extraLocalItems.length) {
-                const localItems = selectedFeedItems.filter(
-                  (item) => getItemSource(item) === LOCAL_GALLERY_SOURCE_KEY,
-                );
-                const nonLocalItems = selectedFeedItems.filter(
-                  (item) => getItemSource(item) !== LOCAL_GALLERY_SOURCE_KEY,
-                );
-                const nonLocalKeepCount = Math.max(
-                  0,
-                  nonLocalItems.length - extraLocalItems.length,
-                );
-
-                selectedFeedItems = [
-                  ...localItems,
-                  ...extraLocalItems,
-                  ...nonLocalItems.slice(0, nonLocalKeepCount),
-                ].slice(0, selectedFeedItems.length);
-              }
-            } catch {
-              // Ignore supplemental local gallery fetch failures; feed still loads.
-            }
-          }
-
-          itemsToAdd = arrangeFeedWithCadence(selectedFeedItems, existingFeedCount);
-        }
-
-        setItemsByCategory((prev) => {
-          const merged = mergeItems(prev[targetCategory] || [], itemsToAdd);
-          const capped = targetCategory === 'feed' ? merged.slice(-200) : merged;
-
-          return {
-            ...prev,
-            [targetCategory]: capped,
-          };
-        });
       } catch (error) {
         setErrorByCategory((prev) => ({
           ...prev,
@@ -2028,13 +2166,7 @@ export default function HomePage() {
         setLoadingByCategory((prev) => ({ ...prev, [targetCategory]: false }));
       }
     },
-    [
-      activeFeedSources.length,
-      enabledSources,
-      fetchBatch,
-      getNextFeedSources,
-      itemsByCategory.feed,
-    ],
+    [buildFeedBatch, buildSeenPredicate, fetchBatch, gatherFeedCandidates, schedulePrefetch],
   );
 
   useEffect(() => {
