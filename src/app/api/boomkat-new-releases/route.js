@@ -53,13 +53,23 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = LOOKUP_TIMEOUT_MS
   }
 }
 
-async function mapInBatches(values, batchSize, mapper) {
-  const results = [];
-  for (let index = 0; index < values.length; index += batchSize) {
-    const slice = values.slice(index, index + batchSize);
-    // eslint-disable-next-line no-await-in-loop
-    results.push(...(await Promise.all(slice.map(mapper))));
-  }
+// Worker pool rather than lockstep chunks, so one slow iTunes lookup delays
+// only itself instead of the whole batch behind it.
+async function mapWithConcurrency(values, concurrency, mapper) {
+  const results = new Array(values.length);
+  const workerCount = Math.max(1, Math.min(concurrency, values.length));
+  let cursor = 0;
+
+  const worker = async () => {
+    while (cursor < values.length) {
+      const index = cursor;
+      cursor += 1;
+      // eslint-disable-next-line no-await-in-loop
+      results[index] = await mapper(values[index], index);
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, worker));
   return results;
 }
 
@@ -457,7 +467,7 @@ export async function GET(request) {
     looked += windowSize;
 
     // eslint-disable-next-line no-await-in-loop
-    const previews = await mapInBatches(window, LOOKUP_CONCURRENCY, findPreview);
+    const previews = await mapWithConcurrency(window, LOOKUP_CONCURRENCY, findPreview);
 
     window.forEach((entry, index) => {
       const preview = previews[index];

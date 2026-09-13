@@ -14,6 +14,7 @@ import {
   Minus,
   Moon,
   Play,
+  RefreshCw,
   Settings2,
   SlidersHorizontal,
   Square,
@@ -58,6 +59,7 @@ const CATEGORY_LABELS = {
   'music-history': 'Music History',
   'music-world': 'World Music',
   boomkat: 'Boomkat',
+  arena: 'Are.na',
   philosophy: 'Philosophy',
   science: 'Science',
   'computer-science': 'Computer Science',
@@ -73,6 +75,7 @@ const PAGE_SIZE = 15;
 const PAGE_SIZE_ART = 10;
 const PAGE_SIZE_MUSIC = 8;
 const PAGE_SIZE_BOOMKAT = 6;
+const PAGE_SIZE_ARENA = 8;
 const LOAD_MORE_BATCH_MAX = 7;
 const ART_CURATED_BATCH = 6;
 // Keep a background buffer of already-fetched, unseen candidates so most
@@ -87,7 +90,7 @@ const CONTROL_ICON_SIZE = 16;
 const AVERAGE_READING_WPM = 220;
 const WIKI_PAGE_SIZE = 6;
 const WIKI_RANDOM_START_MAX = 60;
-const WIKI_SUMMARY_BATCH_SIZE = 3;
+const WIKI_SUMMARY_CONCURRENCY = 6;
 const SHORT_TEXT_LIMIT = 160;
 const HIDDEN_STORAGE_KEY = 'smortscroll:hidden-ids';
 const SEEN_ITEMS_STORAGE_KEY = 'smortscroll:seen-items';
@@ -123,15 +126,167 @@ const MINDFUL_SCORE_VIEW_GAIN_MAX = 4;
 const BOTTOM_BAR_SHOW_SCROLL_PX = 28;
 const BOTTOM_BAR_HIDE_SCROLL_PX = 40;
 const BOTTOM_BAR_SCROLL_DELTA_MIN = 2;
+// Pull-to-refresh: ignore the first few px so taps and horizontal swipes never
+// hijack the scroll, then damp the drag so it feels weighted rather than 1:1.
+const PULL_REFRESH_ENGAGE_PX = 8;
+const PULL_REFRESH_THRESHOLD_PX = 72;
+const PULL_REFRESH_MAX_PX = 116;
+const PULL_REFRESH_RESISTANCE = 0.5;
 const TUMBLR_SOURCE_KEY = 'tumblr-gallery';
 const LOCAL_GALLERY_SOURCE_KEY = 'local-gallery';
 const BOOMKAT_SOURCE_KEY = 'boomkat';
+const ARENA_SOURCE_KEY = 'arena';
 const CUSTOM_TOPIC_PREFIX = 'custom-topic:';
 const TUMBLR_INSERT_EVERY = 10;
 const LOCAL_GALLERY_INSERT_EVERY = 20;
 const ART_QUERY = 'painting';
-const MUSIC_QUERY =
-  'collection:vinyl_archive-of-contemporary-music-records AND mediatype:audio';
+// Internet Archive's geography metadata is patchy: `subject` tags for country
+// or region are sparse and frequently wrong (a "brazil" subject search returns
+// French chanson), and broad geo keyword searches drag in radio captures,
+// sermons and lectures. What is reliable is `language` on the 78rpm
+// collection, plus a handful of subject terms that name a specific tradition
+// rather than a place.
+//
+// The Great 78 Project titles a disc "None legible" when the label could not
+// be read, and that correlates hard with non-Latin scripts — 99% of Thai, 75%
+// of Japanese and 64% of Greek items are unlabelled, against 1% of the
+// collection overall. Those make for useless cards, so every 78rpm bucket
+// filters them out and the counts below are of labelled items only.
+// Placeholder titles the Great 78 cataloguers use when a label can't be read
+// or transcribed, plus language-course discs, which are not music.
+const EXCLUDE_UNLABELLED =
+  ' AND NOT title:"None legible" AND NOT title:"None listed"' +
+  ' AND NOT title:"Title in Chinese" AND NOT title:"Same as other side"' +
+  ' AND NOT title:"Lesson"';
+const UNLABELLED_TITLE = /^\s*(none legible|none listed|title in \w+|same as other side)\s*$/i;
+
+const MUSIC_REGIONS = [
+  // Western classical keeps the largest single share, roughly a quarter.
+  {
+    key: 'classical',
+    label: 'Classical',
+    weight: 5,
+    query: 'collection:vinyl_archive-of-contemporary-music-records AND mediatype:audio',
+  }, // 1163
+  {
+    key: 'latin',
+    label: 'Latin America',
+    weight: 1,
+    query: 'collection:78rpm AND language:"Spanish"' + EXCLUDE_UNLABELLED,
+  }, // 4101
+  {
+    key: 'russia',
+    label: 'Russia',
+    weight: 1,
+    query: 'collection:78rpm AND language:"Russian"' + EXCLUDE_UNLABELLED,
+  }, // 1606
+  {
+    key: 'greece',
+    label: 'Greece',
+    weight: 1,
+    query: 'collection:78rpm AND language:"Greek"' + EXCLUDE_UNLABELLED,
+  }, // 314
+  {
+    key: 'yiddish',
+    label: 'Yiddish & Klezmer',
+    weight: 1,
+    query: 'collection:78rpm AND language:"Yiddish"' + EXCLUDE_UNLABELLED,
+  }, // 257
+  {
+    key: 'hawaii',
+    label: 'Hawai\u02bbi',
+    weight: 1,
+    query: 'collection:78rpm AND language:"Hawaiian"' + EXCLUDE_UNLABELLED,
+  }, // 236
+  {
+    key: 'arab',
+    label: 'Arab World',
+    weight: 1,
+    query: 'collection:78rpm AND language:"Arabic"' + EXCLUDE_UNLABELLED,
+  }, // 178
+  {
+    key: 'brazil-78',
+    label: 'Brazil',
+    weight: 1,
+    query: 'collection:78rpm AND language:"Portuguese"' + EXCLUDE_UNLABELLED,
+  }, // 175
+  {
+    key: 'brazil-modern',
+    label: 'Brazil',
+    weight: 1,
+    query:
+      'collection:audio_music AND (subject:"samba" OR subject:"choro" OR subject:"bossa nova")',
+  }, // 604
+  {
+    key: 'japan',
+    label: 'Japan',
+    weight: 1,
+    query: 'collection:78rpm AND language:"Japanese"' + EXCLUDE_UNLABELLED,
+  }, // 93
+  {
+    key: 'india-classical',
+    label: 'India',
+    weight: 1,
+    query:
+      'collection:audio_music AND (subject:"raga" OR subject:"hindustani" OR subject:"carnatic")',
+  }, // 105
+  {
+    key: 'turkiye',
+    label: 'Turkiye',
+    weight: 1,
+    query: 'collection:78rpm AND language:"Turkish"' + EXCLUDE_UNLABELLED,
+  }, // 72
+  {
+    key: 'indonesia',
+    label: 'Indonesia',
+    weight: 1,
+    query: 'collection:audio_music AND subject:"gamelan"',
+  }, // 56
+  {
+    key: 'india-78',
+    label: 'India',
+    weight: 1,
+    query:
+      'collection:78rpm AND (language:"Hindi" OR language:"Bengali")' + EXCLUDE_UNLABELLED,
+  }, // 32
+  // Africa is the thinnest bucket by far: the 78rpm collection has no Swahili,
+  // Zulu, Xhosa or Yoruba items at all, so there is no language facet to lean
+  // on. Genre and subject names are the best signal left. Title matching was
+  // tried and dropped: it pulled in DJ sets with "Africa" in the name, and
+  // matching title phrases surfaces books about African music, which have no
+  // audio file and get discarded downstream anyway.
+  {
+    key: 'africa',
+    label: 'Africa',
+    weight: 1,
+    query:
+      'collection:audio_music AND (subject:"african music" OR subject:"africa" OR subject:"highlife" OR subject:"afrobeat" OR subject:"soukous" OR subject:"mbaqanga" OR subject:"kwela")',
+  }, // 124
+  // Thailand and China are deliberately absent. 102 of Thailand's 103 items
+  // are unlabelled, all from one missionary record series, leaving a single
+  // usable disc. China drops to 10 usable items once placeholders and
+  // language-course discs are removed, and no subject bucket can top it up:
+  // guqin/erhu/pipa/Peking-opera searches return 4 items between them, mostly
+  // not music. Korean and Vietnamese have no usable items at all.
+];
+
+// Pick one region per batch so each load stays coherent, but never the same
+// region twice running.
+function pickMusicRegion(recentKey) {
+  const pool = MUSIC_REGIONS.filter((region) => region.key !== recentKey);
+  const candidates = pool.length ? pool : MUSIC_REGIONS;
+  const totalWeight = candidates.reduce((sum, region) => sum + region.weight, 0);
+
+  let roll = Math.random() * totalWeight;
+  for (const region of candidates) {
+    roll -= region.weight;
+    if (roll <= 0) {
+      return region;
+    }
+  }
+  return candidates[candidates.length - 1];
+}
+
 const DEFAULT_FEED_SOURCES = [
   'art',
   'tumblr-gallery',
@@ -140,6 +295,7 @@ const DEFAULT_FEED_SOURCES = [
   'music-history',
   'music-world',
   'boomkat',
+  'arena',
   'philosophy',
   'science',
   'computer-science',
@@ -151,6 +307,13 @@ const DEFAULT_FEED_SOURCES = [
   'anthropology-facts',
 ];
 const FEED_SOURCE_BATCH = 2;
+// Internet Archive metadata documents are 50-88KB each and take 0.8-4s, so they
+// dominate a cold load; fetch the whole page of them at once.
+const ARCHIVE_METADATA_CONCURRENCY = 6;
+// First paint fans out wider than a steady-state round and commits each source
+// the moment it lands, so one slow source can no longer hold back the rest.
+const FIRST_PAINT_FAN_OUT = 5;
+const FIRST_PAINT_PER_SOURCE = 2;
 const READ_TIME_SOURCES = new Set([
   'boomkat',
   'art-history',
@@ -520,16 +683,24 @@ async function fetchJsonCached(url, fallbackMessage, ttlMs = API_CACHE_TTL_MS) {
   return value;
 }
 
-async function mapInBatches(items, batchSize, mapper) {
-  const results = [];
-  const safeBatchSize = Math.max(1, batchSize);
+// A fixed pool of workers pulling from a shared queue. The previous lockstep
+// version awaited a whole chunk before starting the next, so every chunk cost
+// its slowest member: 8 Internet Archive lookups worth 16.5s of request time
+// took 8.9s of wall clock instead of roughly the slowest single request.
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+  let cursor = 0;
 
-  for (let index = 0; index < items.length; index += safeBatchSize) {
-    const chunk = items.slice(index, index + safeBatchSize);
-    const mapped = await Promise.all(chunk.map(mapper));
-    results.push(...mapped);
-  }
+  const worker = async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  };
 
+  await Promise.all(Array.from({ length: workerCount }, worker));
   return results;
 }
 
@@ -778,13 +949,24 @@ export default function HomePage() {
   const [showScoreInfo, setShowScoreInfo] = useState(false);
   const [skipAutoBreathBreak, setSkipAutoBreathBreak] = useState(false);
   const [breathOverlaySource, setBreathOverlaySource] = useState(null);
+  const [pullDistance, setPullDistance] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   const inFlightRef = useRef({});
   // Background pool of already-fetched, unseen feed candidates. Drained by
   // load-more (instant, no network) and refilled by the idle prefetch.
   const feedBufferRef = useRef([]);
   const activeFeedSourceSetRef = useRef(new Set());
+  const exhaustedSourcesRef = useRef(new Set());
+  const pullStartRef = useRef({ x: 0, y: 0 });
+  const pullCandidateRef = useRef(false);
+  const pullEngagedRef = useRef(false);
+  const pullDistanceRef = useRef(0);
+  const isRefreshingRef = useRef(false);
+  const pullPassedThresholdRef = useRef(false);
   const lastRefilledSourceSetRef = useRef(null);
+  const pendingFeedReloadRef = useRef(false);
+  const loadMoreRef = useRef(null);
   const prefetchInFlightRef = useRef(false);
   // Latest committed state mirrored into refs so loadMore/fetchBatch can read
   // them without listing them as deps — keeps those callbacks stable so the
@@ -890,6 +1072,11 @@ export default function HomePage() {
     // Keep the ref in sync so async commits (load-more, prefetch) can reject
     // results that were fetched under a topic selection the user has since changed.
     activeFeedSourceSetRef.current = activeFeedSourceSet;
+
+    // A source only counts as exhausted for the selection it was measured under.
+    exhaustedSourcesRef.current = new Set(
+      Array.from(exhaustedSourcesRef.current).filter((key) => activeFeedSourceSet.has(key)),
+    );
 
     // Drop buffered candidates whose source was just disabled.
     if (feedBufferRef.current.length) {
@@ -1209,6 +1396,7 @@ export default function HomePage() {
   );
 
   const clearSeenHistory = useCallback(() => {
+    exhaustedSourcesRef.current = new Set();
     seenIdsRef.current = new Set();
     seenItemsRef.current = [];
     viewedIdsRef.current = new Set();
@@ -1619,6 +1807,43 @@ export default function HomePage() {
         };
       }
 
+      if (targetCategory === ARENA_SOURCE_KEY) {
+        const arenaCursor = cursorByCategoryRef.current[targetCategory] || {};
+        const params = new URLSearchParams({ limit: String(PAGE_SIZE_ARENA) });
+        // Only send a cursor once we have one; the route picks a random
+        // starting term when it sees none, so every session opens elsewhere.
+        if (Number.isFinite(arenaCursor?.termIndex)) {
+          params.set('termIndex', String(arenaCursor.termIndex));
+          params.set('channelIndex', String(arenaCursor.channelIndex ?? 0));
+          params.set('page', String(arenaCursor.page ?? 1));
+        }
+
+        const response = await fetchWithTimeout(`/api/arena?${params.toString()}`, {
+          cache: 'no-store',
+        });
+        const payload = await parseJsonResponse(
+          response,
+          'The Are.na route returned a non-JSON response.',
+        ).catch((error) => ({ error: error.message }));
+
+        if (!response.ok) {
+          throw new Error(payload?.error || 'Could not fetch Are.na channels.');
+        }
+
+        const items = (Array.isArray(payload?.items) ? payload.items : [])
+          .filter((item) => item?.imageUrl)
+          .map((item) => ({
+            ...item,
+            source: targetCategory,
+            tag: item?.tag || CATEGORY_LABELS[targetCategory],
+          }));
+
+        return {
+          items,
+          cursor: payload?.cursor || arenaCursor,
+        };
+      }
+
       if (targetCategory === BOOMKAT_SOURCE_KEY) {
         const boomkatCursor = cursorByCategoryRef.current[targetCategory] || { offset: 0 };
         const offset =
@@ -1664,16 +1889,19 @@ export default function HomePage() {
       }
 
       if (targetCategory === 'music-world') {
+        const previousMusicCursor = cursorByCategoryRef.current[targetCategory] || {};
+        const region = pickMusicRegion(previousMusicCursor.regionKey);
+
         const searchJson = await fetchJson(
           `https://archive.org/advancedsearch.php?q=${encodeURIComponent(
-            MUSIC_QUERY,
+            region.query,
           )}&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=year&rows=${PAGE_SIZE_MUSIC}&sort[]=random&output=json`,
           'Internet Archive returned a non-JSON search response.',
         );
 
         const docs = Array.isArray(searchJson?.response?.docs) ? searchJson.response.docs : [];
 
-        const built = await mapInBatches(docs, 3, async (doc) => {
+        const built = await mapWithConcurrency(docs, ARCHIVE_METADATA_CONCURRENCY, async (doc) => {
           const identifier = doc?.identifier;
           if (!identifier) {
             return null;
@@ -1690,6 +1918,13 @@ export default function HomePage() {
             files.find((file) => /\.(ogg|m4a|flac)$/i.test(file?.name || ''));
 
           if (!audioFile?.name) {
+            return null;
+          }
+
+          // The query filters these out, but subject-based buckets don't carry
+          // the same guarantee, so drop anything still lacking a real title.
+          const rawTitle = typeof doc.title === 'string' ? doc.title.trim() : '';
+          if (!rawTitle || UNLABELLED_TITLE.test(rawTitle)) {
             return null;
           }
 
@@ -1714,11 +1949,11 @@ export default function HomePage() {
           return {
             id: `music-world-${identifier}`,
             source: targetCategory,
-            title: doc.title || audioFile.title || identifier,
+            title: rawTitle,
             detail: [creator && `Artist: ${creator}`, doc.year && `Year: ${doc.year}`]
               .filter(Boolean)
               .join(' - '),
-            tag: `Internet Archive - ${CATEGORY_LABELS[targetCategory]}`,
+            tag: `Internet Archive - ${region.label}`,
             imageUrl,
             audioUrl: `https://archive.org/download/${encodeURIComponent(
               identifier,
@@ -1729,7 +1964,7 @@ export default function HomePage() {
 
         return {
           items: built.filter(Boolean),
-          cursor: {},
+          cursor: { regionKey: region.key },
         };
       }
 
@@ -1749,9 +1984,9 @@ export default function HomePage() {
           selectedNames.push(baseOrder[(initialIndex + index) % baseOrder.length]);
         }
 
-        const summaries = await mapInBatches(
+        const summaries = await mapWithConcurrency(
           selectedNames,
-          WIKI_SUMMARY_BATCH_SIZE,
+          WIKI_SUMMARY_CONCURRENCY,
           async (name) =>
             fetchJsonCached(
               `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(name)}`,
@@ -1801,9 +2036,9 @@ export default function HomePage() {
             (searchJson?.query?.search || []).map((result) => result.title),
           );
 
-          const summaries = await mapInBatches(
+          const summaries = await mapWithConcurrency(
             titles,
-            WIKI_SUMMARY_BATCH_SIZE,
+            WIKI_SUMMARY_CONCURRENCY,
             async (title) =>
               fetchJsonCached(
                 `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
@@ -1861,7 +2096,7 @@ export default function HomePage() {
     [customTopicsByKey],
   );
 
-  const getNextFeedSources = useCallback(() => {
+  const getNextFeedSources = useCallback((requestedBatchSize = FEED_SOURCE_BATCH) => {
     if (!activeFeedSources.length) {
       return [];
     }
@@ -1870,12 +2105,22 @@ export default function HomePage() {
       feedSourceOrderRef.current = shuffleArray(activeFeedSources);
     }
 
-    const order = feedSourceOrderRef.current;
+    // Sources whose whole pool is already in the seen history are skipped rather
+    // than re-served; recycling them is what made Boomkat repeat itself.
+    const order = feedSourceOrderRef.current.filter(
+      (sourceKey) => !exhaustedSourcesRef.current.has(sourceKey),
+    );
+    if (!order.length) {
+      return [];
+    }
+    if (feedSourceIndexRef.current >= order.length) {
+      feedSourceIndexRef.current = 0;
+    }
     const start = feedSourceIndexRef.current;
     const batch = [];
-    const batchSize = Math.min(FEED_SOURCE_BATCH, order.length);
+    const batchSize = Math.min(requestedBatchSize, order.length);
     const nonWikiAvailable = order.some((sourceKey) => !isWikiBackedSource(sourceKey));
-    const maxWikiSources = nonWikiAvailable ? 1 : batchSize;
+    const maxWikiSources = nonWikiAvailable ? Math.max(1, Math.floor(batchSize / 2)) : batchSize;
     let wikiCount = 0;
     let scanned = 0;
     let cursor = start;
@@ -1898,7 +2143,9 @@ export default function HomePage() {
 
     // When a full cycle completes, reshuffle to avoid repeating the same order.
     if (feedSourceIndexRef.current === 0) {
-      feedSourceOrderRef.current = shuffleArray(activeFeedSources);
+      feedSourceOrderRef.current = shuffleArray(
+        activeFeedSources.filter((sourceKey) => !exhaustedSourcesRef.current.has(sourceKey)),
+      );
     }
 
     return batch;
@@ -1922,6 +2169,17 @@ export default function HomePage() {
   // Network fan-out only: pull batches until we have variety + enough raw items,
   // commit cursor advances, and return the unseen candidate pool. Shared by the
   // critical-path load and the background prefetch.
+  // Async fetches capture the topic selection that was active when they started.
+  // By the time they resolve the user may have toggled topics, so every commit
+  // path re-checks against the live selection instead of trusting the snapshot.
+  const keepActiveSourceItems = useCallback((list) => {
+    const activeSet = activeFeedSourceSetRef.current;
+    if (!Array.isArray(list) || !activeSet?.size) {
+      return [];
+    }
+    return list.filter((item) => activeSet.has(getItemSource(item)));
+  }, []);
+
   const gatherFeedCandidates = useCallback(async () => {
     if (!activeFeedSources.length) {
       throw new Error('Enable at least one topic to load your feed.');
@@ -1958,9 +2216,21 @@ export default function HomePage() {
         }
       }
 
+      const isSeenNow = buildSeenPredicate();
       successful.forEach((entry) => {
         const batch = entry.result.value;
-        collectedBatches.push(batch.items);
+        const unseenFromSource = batch.items.filter((item) => !isSeenNow(item));
+
+        if (!unseenFromSource.length) {
+          // Every release this source can still hand us is already in the seen
+          // history. Boomkat's RSS is a fixed ~195-entry window whose offset
+          // wraps to 0, so without this it would loop the same albums forever.
+          exhaustedSourcesRef.current.add(entry.source);
+        } else {
+          exhaustedSourcesRef.current.delete(entry.source);
+          collectedBatches.push(unseenFromSource);
+        }
+
         if (batch.cursor) {
           cursorUpdates.push({ source: entry.source, cursor: batch.cursor });
         }
@@ -1968,10 +2238,6 @@ export default function HomePage() {
 
       rawItems = shuffleArray(interleave(collectedBatches));
       attempts += 1;
-    }
-
-    if (!collectedBatches.length || !rawItems.length) {
-      throw new Error('Could not fetch feed sources.');
     }
 
     if (cursorUpdates.length) {
@@ -1984,10 +2250,130 @@ export default function HomePage() {
       });
     }
 
-    const isPreviouslySeen = buildSeenPredicate();
-    const unseen = rawItems.filter((item) => !isPreviouslySeen(item));
-    return unseen.length ? unseen : rawItems;
+    if (!rawItems.length) {
+      const allExhausted = activeFeedSources.every((sourceKey) =>
+        exhaustedSourcesRef.current.has(sourceKey),
+      );
+      if (allExhausted) {
+        throw new Error(
+          "You've reached the end of every topic you have enabled. Add a topic, or clear your seen history to start over.",
+        );
+      }
+      throw new Error('Could not fetch feed sources.');
+    }
+
+    return rawItems;
   }, [activeFeedSources, buildSeenPredicate, fetchBatch, getNextFeedSources]);
+
+  // Cold-start path. The batched loader collected every source, arranged the
+  // whole batch, then committed once, so the first card waited on the slowest
+  // source even when fast ones had finished seconds earlier. This fans out
+  // wider and commits each source's first couple of items as soon as that one
+  // source resolves; the rest goes to the buffer, where the normal balanced
+  // path picks it up for the next load.
+  const loadFirstFeedPaint = useCallback(async () => {
+    if (!activeFeedSources.length) {
+      throw new Error('Enable at least one topic to load your feed.');
+    }
+
+    const sources = getNextFeedSources(FIRST_PAINT_FAN_OUT);
+    if (!sources.length) {
+      throw new Error(
+        "You've reached the end of every topic you have enabled. Add a topic, or clear your seen history to start over.",
+      );
+    }
+
+    const isPreviouslySeen = buildSeenPredicate();
+    const claimedIds = new Set();
+    const cursorUpdates = [];
+    let committed = 0;
+    let failures = 0;
+
+    await Promise.all(
+      sources.map(async (source) => {
+        try {
+          const batch = await fetchBatch(source);
+          const items = Array.isArray(batch?.items) ? batch.items : [];
+
+          if (batch?.cursor) {
+            cursorUpdates.push({ source, cursor: batch.cursor });
+          }
+
+          const unseen = items.filter(
+            (item) => item?.id && !claimedIds.has(item.id) && !isPreviouslySeen(item),
+          );
+
+          if (!unseen.length) {
+            if (items.length) {
+              exhaustedSourcesRef.current.add(source);
+            }
+            return;
+          }
+
+          exhaustedSourcesRef.current.delete(source);
+
+          const head = unseen.slice(0, FIRST_PAINT_PER_SOURCE);
+          const tail = unseen.slice(FIRST_PAINT_PER_SOURCE);
+          head.forEach((item) => claimedIds.add(item.id));
+
+          if (tail.length) {
+            feedBufferRef.current = [...feedBufferRef.current, ...tail];
+          }
+
+          const active = keepActiveSourceItems(head);
+          if (!active.length) {
+            return;
+          }
+
+          if (!committed && typeof performance !== 'undefined') {
+            // Lets first paint be measured from the outside without guessing.
+            performance.mark?.('smortscroll:first-cards');
+          }
+          committed += active.length;
+          setItemsByCategory((prev) => {
+            const merged = mergeItems(prev.feed || [], active);
+            return { ...prev, feed: merged.slice(-200) };
+          });
+        } catch {
+          // One unreachable or slow source must not sink the whole first paint.
+          failures += 1;
+        }
+      }),
+    );
+
+    if (cursorUpdates.length) {
+      setCursorByCategory((prev) => {
+        const updates = { ...prev };
+        cursorUpdates.forEach((entry) => {
+          updates[entry.source] = entry.cursor;
+        });
+        return updates;
+      });
+    }
+
+    if (committed) {
+      return;
+    }
+
+    if (failures === sources.length) {
+      throw new Error('Could not fetch feed sources.');
+    }
+
+    const allExhausted = activeFeedSources.every((sourceKey) =>
+      exhaustedSourcesRef.current.has(sourceKey),
+    );
+    throw new Error(
+      allExhausted
+        ? "You've reached the end of every topic you have enabled. Add a topic, or clear your seen history to start over."
+        : 'Could not fetch feed sources.',
+    );
+  }, [
+    activeFeedSources,
+    buildSeenPredicate,
+    fetchBatch,
+    getNextFeedSources,
+    keepActiveSourceItems,
+  ]);
 
   // Turn a candidate pool into the arranged batch to display, honoring the
   // Tumblr/local cadence, and return the untouched remainder for the buffer.
@@ -2094,17 +2480,6 @@ export default function HomePage() {
     [buildSeenPredicate, enabledSources, fetchBatch],
   );
 
-  // Async fetches capture the topic selection that was active when they started.
-  // By the time they resolve the user may have toggled topics, so every commit
-  // path re-checks against the live selection instead of trusting the snapshot.
-  const keepActiveSourceItems = useCallback((list) => {
-    const activeSet = activeFeedSourceSetRef.current;
-    if (!Array.isArray(list) || !activeSet?.size) {
-      return [];
-    }
-    return list.filter((item) => activeSet.has(getItemSource(item)));
-  }, []);
-
   // Refill the candidate buffer in the background during idle time so the next
   // load-more is served instantly without waiting on the network.
   const schedulePrefetch = useCallback(() => {
@@ -2158,13 +2533,21 @@ export default function HomePage() {
   const loadMore = useCallback(
     async (targetCategory) => {
       if (inFlightRef.current[targetCategory]) {
+        // Stored topic preferences load while the bootstrap round is still in
+        // flight, so the refill it triggers would otherwise be dropped here and
+        // never retried - leaving the feed empty once the prune strips the
+        // items that round fetched under the old selection.
+        if (targetCategory === 'feed') {
+          pendingFeedReloadRef.current = true;
+        }
         return;
       }
 
       // Feed fast path: drain the prefetched buffer, no critical-path network.
       if (targetCategory === 'feed') {
+        const isPreviouslySeen = buildSeenPredicate();
         const buffered = keepActiveSourceItems(feedBufferRef.current).filter(
-          (item) => !seenIdsRef.current.has(item.id),
+          (item) => !isPreviouslySeen(item),
         );
         if (buffered.length >= LOAD_MORE_BATCH_MAX) {
           inFlightRef.current.feed = true;
@@ -2185,6 +2568,10 @@ export default function HomePage() {
             inFlightRef.current.feed = false;
           }
           schedulePrefetch();
+          if (pendingFeedReloadRef.current) {
+            pendingFeedReloadRef.current = false;
+            loadMoreRef.current?.('feed');
+          }
           return;
         }
       }
@@ -2195,6 +2582,14 @@ export default function HomePage() {
 
       try {
         if (targetCategory === 'feed') {
+          // Nothing on screen yet: stream sources in so the first card paints as
+          // soon as any one source lands, rather than after the slowest.
+          if (!(itemsByCategoryRef.current.feed || []).length) {
+            await loadFirstFeedPaint();
+            schedulePrefetch();
+            return;
+          }
+
           const candidates = await gatherFeedCandidates();
           const pool = keepActiveSourceItems([...feedBufferRef.current, ...candidates]);
           const existingFeedCount = (itemsByCategoryRef.current.feed || []).filter(
@@ -2223,8 +2618,14 @@ export default function HomePage() {
 
           const isPreviouslySeen = buildSeenPredicate();
           const unseenItems = nextItems.filter((item) => !isPreviouslySeen(item));
-          const candidateItems = unseenItems.length ? unseenItems : nextItems;
-          const itemsToAdd = candidateItems.slice(0, LOAD_MORE_BATCH_MAX);
+
+          if (!unseenItems.length) {
+            throw new Error(
+              "You've reached the end of this topic. Clear your seen history to start over.",
+            );
+          }
+
+          const itemsToAdd = unseenItems.slice(0, LOAD_MORE_BATCH_MAX);
 
           setItemsByCategory((prev) => {
             const merged = mergeItems(prev[targetCategory] || [], itemsToAdd);
@@ -2241,6 +2642,13 @@ export default function HomePage() {
       } finally {
         inFlightRef.current[targetCategory] = false;
         setLoadingByCategory((prev) => ({ ...prev, [targetCategory]: false }));
+
+        if (targetCategory === 'feed' && pendingFeedReloadRef.current) {
+          pendingFeedReloadRef.current = false;
+          // Re-entrant, but the flag is cleared first, so this can only chain
+          // once per dropped request rather than looping.
+          loadMoreRef.current?.('feed');
+        }
       }
     },
     [
@@ -2249,9 +2657,14 @@ export default function HomePage() {
       fetchBatch,
       gatherFeedCandidates,
       keepActiveSourceItems,
+      loadFirstFeedPaint,
       schedulePrefetch,
     ],
   );
+
+  useEffect(() => {
+    loadMoreRef.current = loadMore;
+  }, [loadMore]);
 
   useEffect(() => {
     if (category !== 'feed' || bootstrappedFeedRef.current) {
@@ -2261,6 +2674,154 @@ export default function HomePage() {
     bootstrappedFeedRef.current = true;
     loadMore('feed');
   }, [category, loadMore, loadingByCategory.feed]);
+
+  // Pull-to-refresh drops the current feed and refetches. Seen history is kept
+  // on purpose, so a refresh brings genuinely new cards rather than repeats;
+  // exhaustion flags are cleared so sources get one more chance to have
+  // published something since the last check.
+  const refreshFeed = useCallback(async () => {
+    if (inFlightRef.current.feed) {
+      return;
+    }
+
+    exhaustedSourcesRef.current = new Set();
+    feedBufferRef.current = [];
+    feedSourceOrderRef.current = shuffleArray(activeFeedSources);
+    feedSourceIndexRef.current = 0;
+
+    itemsByCategoryRef.current = { ...itemsByCategoryRef.current, feed: [] };
+    setItemsByCategory((prev) => ({ ...prev, feed: [] }));
+    setErrorByCategory((prev) => ({ ...prev, feed: null }));
+
+    await loadMore('feed');
+
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [activeFeedSources, loadMore]);
+
+  const triggerRefresh = useCallback(async () => {
+    if (isRefreshingRef.current) {
+      return;
+    }
+
+    isRefreshingRef.current = true;
+    setIsRefreshing(true);
+    pullDistanceRef.current = PULL_REFRESH_THRESHOLD_PX;
+    setPullDistance(PULL_REFRESH_THRESHOLD_PX);
+
+    try {
+      await refreshFeed();
+    } finally {
+      isRefreshingRef.current = false;
+      setIsRefreshing(false);
+      pullDistanceRef.current = 0;
+      setPullDistance(0);
+    }
+  }, [refreshFeed]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || category !== 'feed') {
+      return;
+    }
+
+    const resetPull = () => {
+      pullCandidateRef.current = false;
+      pullEngagedRef.current = false;
+      pullPassedThresholdRef.current = false;
+      if (pullDistanceRef.current !== 0) {
+        pullDistanceRef.current = 0;
+        setPullDistance(0);
+      }
+    };
+
+    const onTouchStart = (event) => {
+      if (isRefreshingRef.current || event.touches.length !== 1 || window.scrollY > 0) {
+        pullCandidateRef.current = false;
+        return;
+      }
+
+      const touch = event.touches[0];
+      pullStartRef.current = { x: touch.clientX, y: touch.clientY };
+      pullCandidateRef.current = true;
+      pullEngagedRef.current = false;
+      pullPassedThresholdRef.current = false;
+    };
+
+    const onTouchMove = (event) => {
+      if (!pullCandidateRef.current || isRefreshingRef.current) {
+        return;
+      }
+
+      if (event.touches.length !== 1) {
+        resetPull();
+        return;
+      }
+
+      const touch = event.touches[0];
+      const dy = touch.clientY - pullStartRef.current.y;
+      const dx = touch.clientX - pullStartRef.current.x;
+
+      // Scrolling up, swiping sideways, or having left the top all mean this
+      // gesture is not a pull; hand it back to the browser untouched.
+      if (dy <= 0 || Math.abs(dx) > Math.abs(dy) || window.scrollY > 0) {
+        if (!pullEngagedRef.current) {
+          pullCandidateRef.current = false;
+        }
+        resetPull();
+        return;
+      }
+
+      if (!pullEngagedRef.current && dy < PULL_REFRESH_ENGAGE_PX) {
+        return;
+      }
+
+      pullEngagedRef.current = true;
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+
+      const damped = Math.min(PULL_REFRESH_MAX_PX, dy * PULL_REFRESH_RESISTANCE);
+      pullDistanceRef.current = damped;
+      setPullDistance(damped);
+
+      const passed = damped >= PULL_REFRESH_THRESHOLD_PX;
+      if (passed && !pullPassedThresholdRef.current) {
+        navigator.vibrate?.(8);
+      }
+      pullPassedThresholdRef.current = passed;
+    };
+
+    const onTouchEnd = () => {
+      const shouldRefresh =
+        pullEngagedRef.current && pullDistanceRef.current >= PULL_REFRESH_THRESHOLD_PX;
+
+      pullCandidateRef.current = false;
+      pullEngagedRef.current = false;
+      pullPassedThresholdRef.current = false;
+
+      if (shouldRefresh) {
+        triggerRefresh();
+        return;
+      }
+
+      pullDistanceRef.current = 0;
+      setPullDistance(0);
+    };
+
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: false });
+    window.addEventListener('touchend', onTouchEnd, { passive: true });
+    window.addEventListener('touchcancel', onTouchEnd, { passive: true });
+
+    return () => {
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', onTouchEnd);
+      window.removeEventListener('touchcancel', onTouchEnd);
+      resetPull();
+    };
+  }, [category, triggerRefresh]);
 
   // Changing topics prunes the feed, which can leave it too short to reach the
   // load-more sentinel. Refill straight away so the new selection shows content.
@@ -3576,7 +4137,20 @@ export default function HomePage() {
     return () => {
       observer.disconnect();
     };
-  }, [category, errorByCategory.feed, loadMore, loadingByCategory.feed]);
+    // filteredItems.length is a dependency on purpose. An IntersectionObserver
+    // only reports *changes*, and with a short feed the sentinel sits inside the
+    // 500px rootMargin permanently, so it never re-fires on its own. The buffer
+    // fast path in loadMore also returns without ever touching
+    // loadingByCategory, so that flag cannot be relied on to re-arm the
+    // observer. Rebuilding it after every commit re-checks intersection and
+    // keeps the feed growing.
+  }, [
+    category,
+    errorByCategory.feed,
+    filteredItems.length,
+    loadMore,
+    loadingByCategory.feed,
+  ]);
 
   const handleNewTopicKeyDown = useCallback(
     (event) => {
@@ -3673,6 +4247,35 @@ export default function HomePage() {
 
   return (
     <main className={`page${themeClassName}${isLargeText ? ' pageLargeText' : ''}`}>
+      {category === 'feed' && (pullDistance > 0 || isRefreshing) ? (
+        <div
+          className={`pullIndicator${
+            pullDistance >= PULL_REFRESH_THRESHOLD_PX ? ' pullIndicatorReady' : ''
+          }${isRefreshing ? ' pullIndicatorRefreshing' : ''}`}
+          style={{
+            transform: `translate(-50%, ${Math.round(pullDistance)}px)`,
+            opacity: Math.min(1, pullDistance / PULL_REFRESH_THRESHOLD_PX),
+          }}
+          role="status"
+          aria-live="polite">
+          <RefreshCw
+            size={16}
+            aria-hidden="true"
+            style={
+              isRefreshing
+                ? undefined
+                : { transform: `rotate(${Math.round((pullDistance / PULL_REFRESH_THRESHOLD_PX) * 270)}deg)` }
+            }
+          />
+          <span className="pullIndicatorLabel">
+            {isRefreshing
+              ? 'Refreshing'
+              : pullDistance >= PULL_REFRESH_THRESHOLD_PX
+                ? 'Release to refresh'
+                : 'Pull to refresh'}
+          </span>
+        </div>
+      ) : null}
       <header className="headerWrap">
         <p className="kicker">
           the more u read, <br /> the higher ur score{' '}

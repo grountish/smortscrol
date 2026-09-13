@@ -29,6 +29,8 @@ body {
         margin: 0;
         padding: 0;
         min-height: 100%;
+        /* Suppress the browser's own pull-to-refresh so the in-app one owns the gesture. */
+        overscroll-behavior-y: contain;
 }
 
 body {
@@ -1462,5 +1464,64 @@ body[data-theme='paper'] {
 
         .feed .musicCover {
                 height: 260px;
+        }
+}
+
+
+.pullIndicator {
+        position: fixed;
+        top: 6px;
+        left: 50%;
+        z-index: 60;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 14px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--panel);
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+        pointer-events: none;
+        will-change: transform, opacity;
+}
+
+.pullIndicator svg {
+        transition: transform 80ms linear;
+}
+
+.pullIndicatorReady {
+        border-color: var(--accent);
+        color: var(--accent);
+}
+
+.pullIndicatorRefreshing {
+        color: var(--accent);
+}
+
+.pullIndicatorRefreshing svg {
+        animation: pullSpin 900ms linear infinite;
+}
+
+.pullIndicatorLabel {
+        white-space: nowrap;
+}
+
+@keyframes pullSpin {
+        to {
+                transform: rotate(360deg);
+        }
+}
+
+@media (prefers-reduced-motion: reduce) {
+        .pullIndicator svg {
+                transition: none;
+        }
+
+        .pullIndicatorRefreshing svg {
+                animation-duration: 2s;
         }
 }
