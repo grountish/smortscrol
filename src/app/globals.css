@@ -661,6 +661,108 @@ body[data-theme='paper'] {
         opacity: 0.85;
 }
 
+.audioAlbum {
+        margin: 14px 0 4px;
+}
+
+.audioAlbum .audioPlayer {
+        margin: 0;
+}
+
+.audioNowPlaying {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin: 10px 2px 0;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--ink);
+}
+
+.audioNowPlaying span {
+        flex: none;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--accent);
+}
+
+.audioTracklist {
+        list-style: none;
+        margin: 8px 0 0;
+        padding: 4px;
+        max-height: 216px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--chip) 55%, transparent);
+}
+
+.audioTrack {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        padding: 6px 8px;
+        border: none;
+        border-radius: 8px;
+        background: none;
+        color: var(--muted);
+        font: inherit;
+        font-size: 13px;
+        text-align: left;
+        cursor: pointer;
+        transition: background 0.12s ease, color 0.12s ease;
+}
+
+.audioTrack:hover {
+        background: color-mix(in srgb, var(--ink) 7%, transparent);
+        color: var(--ink);
+}
+
+.audioTrack.isActive {
+        background: color-mix(in srgb, var(--accent) 18%, transparent);
+        color: var(--ink);
+        font-weight: 600;
+}
+
+.audioTrackNum {
+        flex: none;
+        display: grid;
+        place-items: center;
+        width: 20px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        color: var(--muted);
+}
+
+.audioTrack.isActive .audioTrackNum {
+        color: var(--accent);
+}
+
+.audioTrackName {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+}
+
+.audioTrackLen {
+        flex: none;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        color: var(--muted);
+}
+
+.audioAlbumNote {
+        margin: 6px 2px 0;
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--muted);
+}
+
 .audioPlayer {
         display: flex;
         align-items: center;

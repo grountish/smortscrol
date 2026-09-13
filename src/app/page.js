@@ -57,6 +57,7 @@ const CATEGORY_LABELS = {
   'art-history': 'Art History',
   'music-history': 'Music History',
   'music-world': 'World Music',
+  boomkat: 'Boomkat',
   philosophy: 'Philosophy',
   science: 'Science',
   'computer-science': 'Computer Science',
@@ -71,6 +72,7 @@ const CATEGORY_LABELS = {
 const PAGE_SIZE = 15;
 const PAGE_SIZE_ART = 10;
 const PAGE_SIZE_MUSIC = 8;
+const PAGE_SIZE_BOOMKAT = 6;
 const LOAD_MORE_BATCH_MAX = 7;
 const ART_CURATED_BATCH = 6;
 // Keep a background buffer of already-fetched, unseen candidates so most
@@ -123,6 +125,7 @@ const BOTTOM_BAR_HIDE_SCROLL_PX = 40;
 const BOTTOM_BAR_SCROLL_DELTA_MIN = 2;
 const TUMBLR_SOURCE_KEY = 'tumblr-gallery';
 const LOCAL_GALLERY_SOURCE_KEY = 'local-gallery';
+const BOOMKAT_SOURCE_KEY = 'boomkat';
 const CUSTOM_TOPIC_PREFIX = 'custom-topic:';
 const TUMBLR_INSERT_EVERY = 10;
 const LOCAL_GALLERY_INSERT_EVERY = 20;
@@ -136,6 +139,7 @@ const DEFAULT_FEED_SOURCES = [
   'art-history',
   'music-history',
   'music-world',
+  'boomkat',
   'philosophy',
   'science',
   'computer-science',
@@ -148,6 +152,7 @@ const DEFAULT_FEED_SOURCES = [
 ];
 const FEED_SOURCE_BATCH = 2;
 const READ_TIME_SOURCES = new Set([
+  'boomkat',
   'art-history',
   'music-history',
   'philosophy',
@@ -778,6 +783,8 @@ export default function HomePage() {
   // Background pool of already-fetched, unseen feed candidates. Drained by
   // load-more (instant, no network) and refilled by the idle prefetch.
   const feedBufferRef = useRef([]);
+  const activeFeedSourceSetRef = useRef(new Set());
+  const lastRefilledSourceSetRef = useRef(null);
   const prefetchInFlightRef = useRef(false);
   // Latest committed state mirrored into refs so loadMore/fetchBatch can read
   // them without listing them as deps — keeps those callbacks stable so the
@@ -822,6 +829,23 @@ export default function HomePage() {
     cursorByCategoryRef.current = cursorByCategory;
   }, [cursorByCategory]);
 
+  const availableDefaultSources = useMemo(
+    () => DEFAULT_FEED_SOURCES.filter((sourceKey) => !removedDefaultSources.has(sourceKey)),
+    [removedDefaultSources],
+  );
+
+  const activeFeedSources = useMemo(() => {
+    const enabled = enabledSources instanceof Set ? enabledSources : new Set();
+    const activeDefault = availableDefaultSources.filter((sourceKey) => enabled.has(sourceKey));
+    const activeCustom = customTopics
+      .filter((topic) => enabled.has(topic.key))
+      .map((topic) => topic.key);
+
+    return [...activeDefault, ...activeCustom];
+  }, [availableDefaultSources, customTopics, enabledSources]);
+
+  const activeFeedSourceSet = useMemo(() => new Set(activeFeedSources), [activeFeedSources]);
+
   const items = useMemo(() => itemsByCategory[category] || [], [itemsByCategory, category]);
 
   const filteredItems = useMemo(() => {
@@ -833,8 +857,14 @@ export default function HomePage() {
       return favoriteItems;
     }
 
-    return items.filter((item) => !hiddenIds.has(item.id) || favoriteIds.has(item.id));
-  }, [category, items, hiddenIds, favoriteIds, seenItems, favoriteItems]);
+    const visible = items.filter((item) => !hiddenIds.has(item.id) || favoriteIds.has(item.id));
+
+    if (category !== 'feed') {
+      return visible;
+    }
+
+    return visible.filter((item) => activeFeedSourceSet.has(getItemSource(item)));
+  }, [category, items, hiddenIds, favoriteIds, seenItems, favoriteItems, activeFeedSourceSet]);
 
   const readerItem = useMemo(
     () => (readerItemId ? filteredItems.find((item) => item.id === readerItemId) || null : null),
@@ -856,27 +886,15 @@ export default function HomePage() {
     [customTopics],
   );
 
-  const availableDefaultSources = useMemo(
-    () => DEFAULT_FEED_SOURCES.filter((sourceKey) => !removedDefaultSources.has(sourceKey)),
-    [removedDefaultSources],
-  );
-
-  const activeFeedSources = useMemo(() => {
-    const enabled = enabledSources instanceof Set ? enabledSources : new Set();
-    const activeDefault = availableDefaultSources.filter((sourceKey) => enabled.has(sourceKey));
-    const activeCustom = customTopics
-      .filter((topic) => enabled.has(topic.key))
-      .map((topic) => topic.key);
-
-    return [...activeDefault, ...activeCustom];
-  }, [availableDefaultSources, customTopics, enabledSources]);
-
   useEffect(() => {
-    const activeSet = new Set(activeFeedSources);
+    // Keep the ref in sync so async commits (load-more, prefetch) can reject
+    // results that were fetched under a topic selection the user has since changed.
+    activeFeedSourceSetRef.current = activeFeedSourceSet;
+
     // Drop buffered candidates whose source was just disabled.
     if (feedBufferRef.current.length) {
       feedBufferRef.current = feedBufferRef.current.filter((item) =>
-        activeSet.has(getItemSource(item)),
+        activeFeedSourceSet.has(getItemSource(item)),
       );
     }
     setItemsByCategory((prev) => {
@@ -884,13 +902,13 @@ export default function HomePage() {
       if (!Array.isArray(feed) || !feed.length) {
         return prev;
       }
-      const pruned = feed.filter((item) => activeSet.has(getItemSource(item)));
+      const pruned = feed.filter((item) => activeFeedSourceSet.has(getItemSource(item)));
       if (pruned.length === feed.length) {
         return prev;
       }
       return { ...prev, feed: pruned };
     });
-  }, [activeFeedSources]);
+  }, [activeFeedSourceSet]);
 
   const topicOptions = useMemo(() => {
     const defaults = availableDefaultSources.map((sourceKey) => ({
@@ -1601,6 +1619,50 @@ export default function HomePage() {
         };
       }
 
+      if (targetCategory === BOOMKAT_SOURCE_KEY) {
+        const boomkatCursor = cursorByCategoryRef.current[targetCategory] || { offset: 0 };
+        const offset =
+          Number.isFinite(boomkatCursor?.offset) && boomkatCursor.offset >= 0
+            ? boomkatCursor.offset
+            : 0;
+
+        const response = await fetchWithTimeout(
+          `/api/boomkat-new-releases?offset=${offset}&limit=${PAGE_SIZE_BOOMKAT}`,
+          { cache: 'no-store' },
+        );
+        const payload = await parseJsonResponse(
+          response,
+          'The Boomkat route returned a non-JSON response.',
+        ).catch((error) => ({ error: error.message }));
+
+        if (!response.ok) {
+          throw new Error(payload?.error || 'Could not fetch Boomkat new releases.');
+        }
+
+        // The route already drops releases with no preview, but guard here too
+        // so a Boomkat card can never render without a play button.
+        const items = (Array.isArray(payload?.items) ? payload.items : [])
+          .filter((item) => item?.audioUrl)
+          .map((item, index) => ({
+            ...item,
+            id: item?.id || `${BOOMKAT_SOURCE_KEY}-${offset + index}`,
+            source: targetCategory,
+            tag: item?.tag || CATEGORY_LABELS[targetCategory],
+          }));
+
+        const nextOffset =
+          Number.isFinite(payload?.nextOffset) && payload.nextOffset >= 0
+            ? payload.nextOffset
+            : offset + PAGE_SIZE_BOOMKAT;
+
+        return {
+          items,
+          cursor: {
+            offset: nextOffset,
+          },
+        };
+      }
+
       if (targetCategory === 'music-world') {
         const searchJson = await fetchJson(
           `https://archive.org/advancedsearch.php?q=${encodeURIComponent(
@@ -2032,6 +2094,17 @@ export default function HomePage() {
     [buildSeenPredicate, enabledSources, fetchBatch],
   );
 
+  // Async fetches capture the topic selection that was active when they started.
+  // By the time they resolve the user may have toggled topics, so every commit
+  // path re-checks against the live selection instead of trusting the snapshot.
+  const keepActiveSourceItems = useCallback((list) => {
+    const activeSet = activeFeedSourceSetRef.current;
+    if (!Array.isArray(list) || !activeSet?.size) {
+      return [];
+    }
+    return list.filter((item) => activeSet.has(getItemSource(item)));
+  }, []);
+
   // Refill the candidate buffer in the background during idle time so the next
   // load-more is served instantly without waiting on the network.
   const schedulePrefetch = useCallback(() => {
@@ -2065,7 +2138,9 @@ export default function HomePage() {
           ...feedBufferRef.current.map((item) => item.id),
           ...(itemsByCategoryRef.current.feed || []).map((item) => item.id),
         ]);
-        const fresh = candidates.filter((item) => item?.id && !existingIds.has(item.id));
+        const fresh = keepActiveSourceItems(candidates).filter(
+          (item) => item?.id && !existingIds.has(item.id),
+        );
         if (fresh.length) {
           feedBufferRef.current = [...feedBufferRef.current, ...fresh];
         }
@@ -2078,7 +2153,7 @@ export default function HomePage() {
 
     const idle = window.requestIdleCallback || ((cb) => window.setTimeout(() => cb(), 300));
     idle(run);
-  }, [activeFeedSources.length, gatherFeedCandidates]);
+  }, [activeFeedSources.length, gatherFeedCandidates, keepActiveSourceItems]);
 
   const loadMore = useCallback(
     async (targetCategory) => {
@@ -2088,7 +2163,7 @@ export default function HomePage() {
 
       // Feed fast path: drain the prefetched buffer, no critical-path network.
       if (targetCategory === 'feed') {
-        const buffered = feedBufferRef.current.filter(
+        const buffered = keepActiveSourceItems(feedBufferRef.current).filter(
           (item) => !seenIdsRef.current.has(item.id),
         );
         if (buffered.length >= LOAD_MORE_BATCH_MAX) {
@@ -2098,10 +2173,11 @@ export default function HomePage() {
               (item) => !seenIdsRef.current.has(item.id),
             ).length;
             const { arranged, rest } = await buildFeedBatch(buffered, existingFeedCount);
-            feedBufferRef.current = rest;
-            if (arranged.length) {
+            feedBufferRef.current = keepActiveSourceItems(rest);
+            const activeArranged = keepActiveSourceItems(arranged);
+            if (activeArranged.length) {
               setItemsByCategory((prev) => {
-                const merged = mergeItems(prev.feed || [], arranged);
+                const merged = mergeItems(prev.feed || [], activeArranged);
                 return { ...prev, feed: merged.slice(-200) };
               });
             }
@@ -2120,15 +2196,16 @@ export default function HomePage() {
       try {
         if (targetCategory === 'feed') {
           const candidates = await gatherFeedCandidates();
-          const pool = [...feedBufferRef.current, ...candidates];
+          const pool = keepActiveSourceItems([...feedBufferRef.current, ...candidates]);
           const existingFeedCount = (itemsByCategoryRef.current.feed || []).filter(
             (item) => !seenIdsRef.current.has(item.id),
           ).length;
           const { arranged, rest } = await buildFeedBatch(pool, existingFeedCount);
-          feedBufferRef.current = rest;
-          if (arranged.length) {
+          feedBufferRef.current = keepActiveSourceItems(rest);
+          const activeArranged = keepActiveSourceItems(arranged);
+          if (activeArranged.length) {
             setItemsByCategory((prev) => {
-              const merged = mergeItems(prev.feed || [], arranged);
+              const merged = mergeItems(prev.feed || [], activeArranged);
               return { ...prev, feed: merged.slice(-200) };
             });
           }
@@ -2166,7 +2243,14 @@ export default function HomePage() {
         setLoadingByCategory((prev) => ({ ...prev, [targetCategory]: false }));
       }
     },
-    [buildFeedBatch, buildSeenPredicate, fetchBatch, gatherFeedCandidates, schedulePrefetch],
+    [
+      buildFeedBatch,
+      buildSeenPredicate,
+      fetchBatch,
+      gatherFeedCandidates,
+      keepActiveSourceItems,
+      schedulePrefetch,
+    ],
   );
 
   useEffect(() => {
@@ -2177,6 +2261,21 @@ export default function HomePage() {
     bootstrappedFeedRef.current = true;
     loadMore('feed');
   }, [category, loadMore, loadingByCategory.feed]);
+
+  // Changing topics prunes the feed, which can leave it too short to reach the
+  // load-more sentinel. Refill straight away so the new selection shows content.
+  useEffect(() => {
+    if (!bootstrappedFeedRef.current || category !== 'feed' || !activeFeedSourceSet.size) {
+      return;
+    }
+
+    if (lastRefilledSourceSetRef.current === activeFeedSourceSet) {
+      return;
+    }
+    lastRefilledSourceSetRef.current = activeFeedSourceSet;
+
+    loadMore('feed');
+  }, [activeFeedSourceSet, category, loadMore]);
 
   useEffect(() => {
     let active = true;
@@ -3809,7 +3908,7 @@ export default function HomePage() {
                   <p className="cardDetail">{displayText}</p>
                 ) : null}
               </div>
-              {item.audioUrl ? <AudioPlayer src={item.audioUrl} /> : null}
+              {item.audioUrl ? <AudioPlayer src={item.audioUrl} tracks={item.tracks} /> : null}
               {canToggle ? (
                 <p className="cardHint">{isExpanded ? 'Tap to collapse' : 'Tap to expand'}</p>
               ) : null}
@@ -4016,7 +4115,9 @@ export default function HomePage() {
                 })()}
               </div>
             )}
-            {readerItem.audioUrl ? <AudioPlayer src={readerItem.audioUrl} /> : null}
+            {readerItem.audioUrl ? (
+              <AudioPlayer src={readerItem.audioUrl} tracks={readerItem.tracks} />
+            ) : null}
             {readerItem.webUrl ? (
               <a href={readerItem.webUrl} className="cardLink" target="_blank" rel="noreferrer">
                 Open source
