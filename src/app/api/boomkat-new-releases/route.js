@@ -12,7 +12,7 @@ export const maxDuration = 60;
 // session. Do not raise this without re-measuring.
 const BOOMKAT_FEED_URL =
   process.env.BOOMKAT_FEED_URL ||
-  'https://boomkat.com/new-releases.rss?per_page=100&q%5Bgenre%5D=46%2C49%2C48';
+  'https://boomkat.com/new-releases.rss?per_page=100&q%5Bgenre%5D=46%2C49%2C48%2C62%2C60%2C44';
 // Preview audio comes from the iTunes Search API (public, no key). Boomkat is a
 // UK shop, so default to the GB storefront for better catalogue overlap.
 const ITUNES_COUNTRY = process.env.BOOMKAT_ITUNES_COUNTRY || 'gb';
@@ -38,12 +38,21 @@ const MAX_TRACKS = 60;
 
 // Hang the caches off globalThis so Next's dev-mode HMR, which hands the route
 // a fresh module instance on every recompile, doesn't throw away a warm feed.
-const cacheHome =
-  globalThis.__boomkatCache ||
-  (globalThis.__boomkatCache = {
-    feed: { at: 0, entries: null, inFlight: null, error: null },
-    previews: new Map(),
-  });
+const cacheHome = (globalThis.__boomkatCache ||= {});
+cacheHome.feed ||= { at: 0, entries: null, inFlight: null, error: null, url: null };
+cacheHome.previews ||= new Map();
+// Dev HMR deliberately preserves this cache. Key it by the configured URL so
+// changing genre filters cannot keep serving the previous feed until its TTL
+// expires.
+if (cacheHome.feed.url !== BOOMKAT_FEED_URL) {
+  cacheHome.feed = {
+    at: 0,
+    entries: null,
+    inFlight: null,
+    error: null,
+    url: BOOMKAT_FEED_URL,
+  };
+}
 const feedCache = cacheHome.feed;
 const previewCache = cacheHome.previews;
 

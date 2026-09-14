@@ -22,6 +22,8 @@ const SEED_CHANNEL_SLUGS = (process.env.ARENA_SEED_CHANNELS || '')
     'artbreader',
     'general-design-mrmc7kznmku',
     'layout-hierarchy-aesthetics',
+    'mood-board-ee1vlpuw3ou',
+    'design-0zjlgvqp50w',
   ]);
 
 // Changing the seed list has to invalidate the harvested graph, which outlives

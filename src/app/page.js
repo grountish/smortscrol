@@ -925,6 +925,8 @@ export default function HomePage() {
   const [loadingFullText, setLoadingFullText] = useState({});
   const [hiddenIds, setHiddenIds] = useState(new Set());
   const [seenItems, setSeenItems] = useState([]);
+  const [hasLoadedFeedHistory, setHasLoadedFeedHistory] = useState(false);
+  const [hasLoadedFeedPreferences, setHasLoadedFeedPreferences] = useState(false);
   const [favoriteIds, setFavoriteIds] = useState(new Set());
   const [favoriteItems, setFavoriteItems] = useState([]);
   const [themeMode, setThemeMode] = useState(THEME_MODE_LIGHT);
@@ -1813,9 +1815,12 @@ export default function HomePage() {
         // Only send a cursor once we have one; the route picks a random
         // starting term when it sees none, so every session opens elsewhere.
         if (Number.isFinite(arenaCursor?.termIndex)) {
+          params.set('curatedIndex', String(arenaCursor.curatedIndex ?? 0));
+          params.set('curatedPage', String(arenaCursor.curatedPage ?? 1));
           params.set('termIndex', String(arenaCursor.termIndex));
           params.set('channelIndex', String(arenaCursor.channelIndex ?? 0));
           params.set('page', String(arenaCursor.page ?? 1));
+          params.set('turn', String(arenaCursor.turn ?? 0));
         }
 
         const response = await fetchWithTimeout(`/api/arena?${params.toString()}`, {
@@ -2233,6 +2238,13 @@ export default function HomePage() {
 
         if (batch.cursor) {
           cursorUpdates.push({ source: entry.source, cursor: batch.cursor });
+          // A single gather can revisit a source before React commits state.
+          // Advance the ref immediately so that later rounds do not request
+          // the same page again with a stale cursor.
+          cursorByCategoryRef.current = {
+            ...cursorByCategoryRef.current,
+            [entry.source]: batch.cursor,
+          };
         }
       });
 
@@ -2667,13 +2679,24 @@ export default function HomePage() {
   }, [loadMore]);
 
   useEffect(() => {
-    if (category !== 'feed' || bootstrappedFeedRef.current) {
+    if (
+      !hasLoadedFeedHistory ||
+      !hasLoadedFeedPreferences ||
+      category !== 'feed' ||
+      bootstrappedFeedRef.current
+    ) {
       return;
     }
 
     bootstrappedFeedRef.current = true;
     loadMore('feed');
-  }, [category, loadMore, loadingByCategory.feed]);
+  }, [
+    category,
+    hasLoadedFeedHistory,
+    hasLoadedFeedPreferences,
+    loadMore,
+    loadingByCategory.feed,
+  ]);
 
   // Pull-to-refresh drops the current feed and refetches. Seen history is kept
   // on purpose, so a refresh brings genuinely new cards rather than repeats;
@@ -2921,12 +2944,15 @@ export default function HomePage() {
         try {
           const parsed = JSON.parse(storedCursors);
           if (parsed && typeof parsed === 'object') {
+            cursorByCategoryRef.current = parsed;
             setCursorByCategory(parsed);
           }
         } catch {
           // Ignore invalid cursor cache.
         }
       }
+
+      setHasLoadedFeedHistory(true);
     };
 
     loadStoredState();
@@ -3766,11 +3792,13 @@ export default function HomePage() {
       }
     } catch {
       // Ignore invalid stored topic preferences.
+    } finally {
+      setHasLoadedFeedPreferences(true);
     }
   }, []);
 
   useEffect(() => {
-    if (typeof window === 'undefined') {
+    if (typeof window === 'undefined' || !hasLoadedFeedPreferences) {
       return;
     }
 
@@ -3786,7 +3814,7 @@ export default function HomePage() {
     } catch {
       // Ignore storage write failures.
     }
-  }, [customTopics, enabledSources, removedDefaultSources]);
+  }, [customTopics, enabledSources, hasLoadedFeedPreferences, removedDefaultSources]);
 
   useEffect(() => {
     feedSourceOrderRef.current = shuffleArray(activeFeedSources);

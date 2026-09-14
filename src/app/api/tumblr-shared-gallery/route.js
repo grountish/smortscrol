@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 const TUMBLR_API_BASE = process.env.TUMBLR_API_BASE || 'https://api.tumblr.com/v2';
 const TUMBLR_DASHBOARD_LIMIT_DEFAULT = toInt(process.env.TUMBLR_DASHBOARD_LIMIT, 20);
 const TUMBLR_DASHBOARD_LIMIT_MAX = 40;
+const SUMMARY_TITLE_MAX_LENGTH = 80;
+const DETAIL_MAX_LENGTH = 800;
 
 function encodeOAuth(value) {
   return encodeURIComponent(String(value ?? ''))
@@ -82,20 +84,14 @@ function toInt(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function extractTextSnippet(post) {
-  const explicit = [post?.summary, post?.title, post?.caption, post?.trail_text]
-    .filter((value) => typeof value === 'string' && value.trim())
-    .map((value) =>
-      value
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim(),
-    )[0];
+function cleanHtmlText(value) {
+  return String(value ?? '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
-  if (explicit) {
-    return explicit;
-  }
-
+function collectBlockText(post) {
   const blockTexts = [];
   const collectText = (blocks) => {
     if (!Array.isArray(blocks)) {
@@ -114,7 +110,48 @@ function extractTextSnippet(post) {
     post.trail.forEach((trailEntry) => collectText(trailEntry?.content));
   }
 
-  return blockTexts.join(' ').slice(0, 260);
+  return blockTexts.join(' ');
+}
+
+function truncateAtWord(text, limit) {
+  const value = String(text || '').trim();
+  if (value.length <= limit) {
+    return value;
+  }
+
+  const clipped = value.slice(0, limit);
+  const lastSpace = clipped.lastIndexOf(' ');
+  const trimmed = lastSpace > limit * 0.6 ? clipped.slice(0, lastSpace) : clipped;
+  return `${trimmed.trim()}\u2026`;
+}
+
+// Tumblr only has a real headline for posts that were given one. For text posts the
+// `summary` is just the opening of the body, often cut mid-sentence, so it reads as a
+// description and belongs under the card title, not in it.
+function looksLikeDescription(text) {
+  const value = String(text || '').trim();
+  if (!value) {
+    return false;
+  }
+
+  if (value.length > SUMMARY_TITLE_MAX_LENGTH) {
+    return true;
+  }
+
+  if (/(\.\.\.|\u2026)$/.test(value) || /\.$/.test(value)) {
+    return true;
+  }
+
+  return /[.!?]["')\]]?\s+\S/.test(value);
+}
+
+function extractTextSnippet(post) {
+  const fromBlocks = cleanHtmlText(collectBlockText(post));
+  if (fromBlocks) {
+    return fromBlocks;
+  }
+
+  return [post?.caption, post?.trail_text, post?.summary, post?.title].map(cleanHtmlText).find(Boolean) || '';
 }
 
 function pickBestMediaUrl(mediaArray) {
@@ -175,7 +212,8 @@ function stripRawUrls(text) {
   return String(text || '')
     .replace(/https?:\/\/\S+/gi, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim()
+    .replace(/[\s,;:]+$/, '');
 }
 
 function normalizeForComparison(text) {
@@ -206,6 +244,40 @@ async function parseJsonResponse(response, fallbackMessage) {
   } catch {
     throw new Error(summarizeNonJsonResponse(rawText, fallbackMessage));
   }
+}
+
+function buildPostItems(post) {
+  const imageUrls = extractPostImageUrls(post);
+  if (!imageUrls.length) {
+    return [];
+  }
+
+  const blogName = cleanHtmlText(post?.blog?.title) || post?.blog_name || 'Tumblr post';
+  const summary = stripRawUrls(cleanHtmlText(post?.summary));
+  const summaryIsDescription = looksLikeDescription(summary);
+  const title = summary && !summaryIsDescription ? summary : blogName;
+  const bodyText = stripRawUrls(extractTextSnippet(post)) || (summaryIsDescription ? summary : '');
+  const detail = truncateAtWord(bodyText, DETAIL_MAX_LENGTH);
+  const normalizedTitle = normalizeForComparison(title);
+  const normalizedDetail = normalizeForComparison(detail);
+
+  let displayDetail = detail;
+  if (normalizedTitle && normalizedDetail === normalizedTitle) {
+    displayDetail = '';
+  } else if (normalizedTitle && normalizedDetail.startsWith(normalizedTitle)) {
+    displayDetail = detail.slice(title.length).replace(/^[\s:\u2013\u2014-]+/, '');
+  }
+
+  const webUrl = post?.post_url || post?.short_url || null;
+
+  return imageUrls.map((imageUrl, index) => ({
+    id: post?.id ? `tumblr-gallery-${post.id}-${index}` : `tumblr-gallery-${imageUrl}`,
+    title,
+    detail: displayDetail,
+    tag: '-',
+    imageUrl,
+    webUrl,
+  }));
 }
 
 export async function GET(request) {
@@ -284,28 +356,7 @@ export async function GET(request) {
 
   const posts = Array.isArray(payload?.response?.posts) ? payload.response.posts : [];
 
-  const items = posts.flatMap((post) => {
-    const imageUrls = extractPostImageUrls(post);
-    if (!imageUrls.length) {
-      return [];
-    }
-
-    const title = stripRawUrls(post?.summary) || post?.blog_name || 'Tumblr post';
-    const detail = stripRawUrls(extractTextSnippet(post));
-    const normalizedTitle = normalizeForComparison(title);
-    const normalizedDetail = normalizeForComparison(detail);
-    const displayDetail = normalizedTitle && normalizedTitle === normalizedDetail ? '' : detail;
-    const webUrl = post?.post_url || post?.short_url || null;
-
-    return imageUrls.map((imageUrl, index) => ({
-      id: post?.id ? `tumblr-gallery-${post.id}-${index}` : `tumblr-gallery-${imageUrl}`,
-      title,
-      detail: displayDetail,
-      tag: '-',
-      imageUrl,
-      webUrl,
-    }));
-  });
+  const items = posts.flatMap(buildPostItems);
 
   const nextOffset = posts.length < limit ? 0 : offset + posts.length;
 
