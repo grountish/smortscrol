@@ -1,11 +1,18 @@
 import { NextResponse } from 'next/server';
 
+// A cold Data Cache miss has to fetch the Boomkat feed (~5s) plus a round of
+// iTunes lookups, which overruns the default serverless function limit.
+export const maxDuration = 60;
+
 // Boomkat's HTML pages sit behind a Cloudflare bot challenge, but the site
 // publishes the same listing as RSS and honours the same query params, so the
 // feed is the only thing we fetch from boomkat.com.
+// per_page drives the cost: 200 releases is ~13s to first byte, 100 is ~5s
+// for 96 items, which is far more than the feed paginates through in a
+// session. Do not raise this without re-measuring.
 const BOOMKAT_FEED_URL =
   process.env.BOOMKAT_FEED_URL ||
-  'https://boomkat.com/new-releases.rss?per_page=200&q%5Bgenre%5D=46%2C49%2C48';
+  'https://boomkat.com/new-releases.rss?per_page=100&q%5Bgenre%5D=46%2C49%2C48';
 // Preview audio comes from the iTunes Search API (public, no key). Boomkat is a
 // UK shop, so default to the GB storefront for better catalogue overlap.
 const ITUNES_COUNTRY = process.env.BOOMKAT_ITUNES_COUNTRY || 'gb';
@@ -13,9 +20,11 @@ const ITUNES_SEARCH_BASE = 'https://itunes.apple.com/search';
 const ITUNES_LOOKUP_BASE = 'https://itunes.apple.com/lookup';
 
 const FEED_TTL_MS = 15 * 60 * 1000;
+const FEED_REVALIDATE_S = 15 * 60;
+const PREVIEW_REVALIDATE_S = 24 * 60 * 60;
 const PREVIEW_TTL_MS = 24 * 60 * 60 * 1000;
-// The feed is server-rendered with 200 full reviews and routinely needs ~11s
-// to first byte, so it gets a far longer leash than the iTunes lookups.
+// The feed is server-rendered with all reviews inline, so it gets a far
+// longer leash than the iTunes lookups.
 const FEED_TIMEOUT_MS = 30000;
 const LOOKUP_TIMEOUT_MS = 8000;
 const DEFAULT_LIMIT = 8;
@@ -43,11 +52,16 @@ function toInt(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = LOOKUP_TIMEOUT_MS) {
+// `revalidate` puts the response in Next's Data Cache, which — unlike this
+// module's in-process maps — survives between serverless invocations. Without
+// it every cold instance refetched everything from scratch.
+async function fetchWithTimeout(url, options = {}, timeoutMs = LOOKUP_TIMEOUT_MS, revalidate) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const caching =
+    revalidate === undefined ? { cache: 'no-store' } : { next: { revalidate } };
   try {
-    return await fetch(url, { ...options, signal: controller.signal, cache: 'no-store' });
+    return await fetch(url, { ...options, ...caching, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }
@@ -192,65 +206,79 @@ function parseFeedEntry(block, index) {
   };
 }
 
-function startFeedLoad() {
-  if (feedCache.inFlight) {
-    return feedCache.inFlight;
+async function loadFeed() {
+  // Cloudflare sometimes answers the feed with a bot challenge instead of the
+  // RSS. It is intermittent, so one retry clears it more often than not.
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(
+        BOOMKAT_FEED_URL,
+        { headers: { Accept: 'application/rss+xml, application/xml;q=0.9, */*;q=0.8' } },
+        FEED_TIMEOUT_MS,
+        // Only the first caller past each revalidate window pays the upstream
+        // cost; everyone else is served from the Data Cache.
+        FEED_REVALIDATE_S,
+      );
+
+      if (!response.ok) {
+        throw new Error(`Boomkat feed responded ${response.status}.`);
+      }
+
+      const xml = await response.text();
+      if (!/<rss/i.test(xml)) {
+        throw new Error('Boomkat returned a non-RSS response.');
+      }
+
+      const entries = [];
+      const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
+      let match = itemPattern.exec(xml);
+      let index = 0;
+      while (match) {
+        const entry = parseFeedEntry(match[1], index);
+        if (entry) {
+          entries.push(entry);
+        }
+        index += 1;
+        match = itemPattern.exec(xml);
+      }
+
+      feedCache.entries = entries;
+      feedCache.at = Date.now();
+      feedCache.error = null;
+      return entries;
+    } catch (error) {
+      lastError = error;
+    }
   }
 
-  feedCache.inFlight = (async () => {
-    const response = await fetchWithTimeout(
-      BOOMKAT_FEED_URL,
-      { headers: { Accept: 'application/rss+xml, application/xml;q=0.9, */*;q=0.8' } },
-      FEED_TIMEOUT_MS,
-    );
-
-    if (!response.ok) {
-      throw new Error(`Boomkat feed responded ${response.status}.`);
-    }
-
-    const xml = await response.text();
-    if (!/<rss/i.test(xml)) {
-      throw new Error('Boomkat returned a non-RSS response.');
-    }
-
-    const entries = [];
-    const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
-    let match = itemPattern.exec(xml);
-    let index = 0;
-    while (match) {
-      const entry = parseFeedEntry(match[1], index);
-      if (entry) {
-        entries.push(entry);
-      }
-      index += 1;
-      match = itemPattern.exec(xml);
-    }
-
-    feedCache.entries = entries;
-    feedCache.at = Date.now();
-    feedCache.error = null;
-    return entries;
-  })()
-    .catch((error) => {
-      feedCache.error = error?.message || 'Could not fetch the Boomkat feed.';
-      throw error;
-    })
-    .finally(() => {
-      feedCache.inFlight = null;
-    });
-
-  return feedCache.inFlight;
+  feedCache.error = lastError?.message || 'Could not fetch the Boomkat feed.';
+  throw lastError || new Error(feedCache.error);
 }
 
-// Boomkat's feed needs ~11s to first byte, well past the client's per-source
-// abort. So never block on it: kick off the load, serve whatever is cached
-// (stale is fine), and let the next load-more pick up the fresh copy.
-function getFeed() {
-  const isFresh = feedCache.entries && Date.now() - feedCache.at < FEED_TTL_MS;
-  if (!isFresh) {
-    startFeedLoad().catch(() => {});
+// Serve the in-process copy when this instance happens to be warm, otherwise
+// actually wait for the feed. The previous version kicked the load off in the
+// background and returned an empty batch immediately, which works on a
+// long-lived dev server but never completes on serverless: the instance is
+// frozen as soon as the response is sent, so the feed never warmed and every
+// request returned empty forever.
+async function getFeed() {
+  if (feedCache.entries && Date.now() - feedCache.at < FEED_TTL_MS) {
+    return feedCache.entries;
   }
-  return feedCache.entries;
+
+  if (!feedCache.inFlight) {
+    feedCache.inFlight = loadFeed().finally(() => {
+      feedCache.inFlight = null;
+    });
+  }
+
+  try {
+    return await feedCache.inFlight;
+  } catch {
+    // A stale copy beats an empty feed.
+    return feedCache.entries;
+  }
 }
 
 function normalizeForMatch(text) {
@@ -320,7 +348,12 @@ async function fetchTracklist(collectionId) {
     collectionId,
   )}&entity=song&limit=${MAX_TRACKS}&country=${ITUNES_COUNTRY}`;
 
-  const response = await fetchWithTimeout(url, { headers: { Accept: 'application/json' } });
+  const response = await fetchWithTimeout(
+    url,
+    { headers: { Accept: 'application/json' } },
+    LOOKUP_TIMEOUT_MS,
+    PREVIEW_REVALIDATE_S,
+  );
   if (!response.ok) {
     return [];
   }
@@ -356,7 +389,12 @@ async function findPreview(entry) {
 
   let value = null;
   try {
-    const response = await fetchWithTimeout(url, { headers: { Accept: 'application/json' } });
+    const response = await fetchWithTimeout(
+      url,
+      { headers: { Accept: 'application/json' } },
+      LOOKUP_TIMEOUT_MS,
+      PREVIEW_REVALIDATE_S,
+    );
     if (response.ok) {
       const payload = await response.json();
       const results = Array.isArray(payload?.results) ? payload.results : [];
@@ -435,15 +473,13 @@ export async function GET(request) {
   const offset = Math.max(0, toInt(searchParams.get('offset'), 0));
   const limit = Math.min(MAX_LIMIT, Math.max(1, toInt(searchParams.get('limit'), DEFAULT_LIMIT)));
 
-  const entries = getFeed();
+  const entries = await getFeed();
 
   if (!entries) {
-    if (feedCache.error && !feedCache.inFlight) {
-      return NextResponse.json({ error: feedCache.error }, { status: 502 });
-    }
-    // First hit of a cold cache: hand back an empty batch so the feed simply
-    // skips Boomkat this round rather than waiting on the upstream fetch.
-    return NextResponse.json({ items: [], nextOffset: offset, warming: true });
+    return NextResponse.json(
+      { error: feedCache.error || 'Could not fetch the Boomkat feed.' },
+      { status: 502 },
+    );
   }
 
   if (!entries.length) {
