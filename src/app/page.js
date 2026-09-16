@@ -103,6 +103,12 @@ const TEXT_SIZE_STORAGE_KEY = 'smortscroll:text-size';
 const MINDFUL_SCORE_STORAGE_KEY = 'smortscroll:mindful-score';
 const READING_GUIDE_STORAGE_KEY = 'smortscroll:reading-guide';
 const AUTO_SCROLL_STORAGE_KEY = 'smortscroll:auto-scroll';
+// Seen history is disposable: it exists so the feed stops repeating itself. Left
+// uncapped it grew to megabytes and pushed the origin over its localStorage quota,
+// which took the (tiny, deliberate) favourites down with it.
+const MAX_STORED_SEEN_ITEMS = 400;
+const SEEN_RETRY_SIZES = [200, 100, 40, 0];
+
 const TOPIC_PREFERENCES_STORAGE_KEY = 'smortscroll:topic-preferences';
 const BREATH_BREAK_SKIP_SESSION_KEY = 'smortscroll:breath-break-skip-session';
 const AUTO_SCROLL_STEP_PX = 100;
@@ -132,6 +138,25 @@ const PULL_REFRESH_ENGAGE_PX = 8;
 const PULL_REFRESH_THRESHOLD_PX = 72;
 const PULL_REFRESH_MAX_PX = 116;
 const PULL_REFRESH_RESISTANCE = 0.5;
+// Full article bodies are refetched on demand from wikiTitle, so keeping them in
+// localStorage buys nothing and costs tens of kilobytes per expanded article.
+const toStoredItem = (item) => {
+  if (!item || !item.detailFull) {
+    return item;
+  }
+  const { detailFull, ...rest } = item;
+  return rest;
+};
+
+const writeStorageKey = (key, value) => {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const TUMBLR_SOURCE_KEY = 'tumblr-gallery';
 const LOCAL_GALLERY_SOURCE_KEY = 'local-gallery';
 const BOOMKAT_SOURCE_KEY = 'boomkat';
@@ -1288,29 +1313,43 @@ export default function HomePage() {
     });
   }, []);
 
+  const flushSeenSave = useCallback(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    if (saveTimeoutRef.current) {
+      window.clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+
+    // Favourites first, and each key in its own try block. They are what the
+    // reader picked on purpose, so they must never be lost to a quota error
+    // raised by the seen-history blob that used to be written ahead of them.
+    writeStorageKey(FAVORITES_STORAGE_KEY, Array.from(favoriteIdsRef.current));
+    writeStorageKey(FAVORITES_ITEMS_STORAGE_KEY, favoriteItemsRef.current.map(toStoredItem));
+    writeStorageKey(HIDDEN_STORAGE_KEY, Array.from(seenIdsRef.current));
+
+    const storedSeen = seenItemsRef.current.slice(0, MAX_STORED_SEEN_ITEMS).map(toStoredItem);
+    if (!writeStorageKey(SEEN_ITEMS_STORAGE_KEY, storedSeen)) {
+      // Out of room: shed seen history until it fits rather than give up on the
+      // whole save. An empty history only costs some repeated cards.
+      SEEN_RETRY_SIZES.some((size) =>
+        writeStorageKey(SEEN_ITEMS_STORAGE_KEY, storedSeen.slice(0, size)),
+      );
+    }
+  }, []);
+
   const queueSeenSave = useCallback(() => {
     if (saveTimeoutRef.current || typeof window === 'undefined') {
       return;
     }
 
     saveTimeoutRef.current = window.setTimeout(() => {
-      const ids = Array.from(seenIdsRef.current);
-      const storedItems = seenItemsRef.current;
-      const favorites = Array.from(favoriteIdsRef.current);
-      const storedFavorites = favoriteItemsRef.current;
-
-      try {
-        window.localStorage.setItem(HIDDEN_STORAGE_KEY, JSON.stringify(ids));
-        window.localStorage.setItem(SEEN_ITEMS_STORAGE_KEY, JSON.stringify(storedItems));
-        window.localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(favorites));
-        window.localStorage.setItem(FAVORITES_ITEMS_STORAGE_KEY, JSON.stringify(storedFavorites));
-      } catch {
-        // Ignore storage write failures.
-      }
-
       saveTimeoutRef.current = null;
+      flushSeenSave();
     }, 500);
-  }, []);
+  }, [flushSeenSave]);
 
   const addSeenItems = useCallback((additions) => {
     if (!additions.length) {
@@ -2961,9 +3000,38 @@ export default function HomePage() {
       active = false;
       if (saveTimeoutRef.current) {
         window.clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
       }
     };
   }, []);
+
+  // The 500ms debounce means a heart tapped just before the tab is closed or
+  // backgrounded would otherwise never reach localStorage.
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return undefined;
+    }
+
+    const flush = () => {
+      if (saveTimeoutRef.current) {
+        flushSeenSave();
+      }
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        flush();
+      }
+    };
+
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [flushSeenSave]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
