@@ -1525,3 +1525,8 @@ body[data-theme='paper'] {
                 animation-duration: 2s;
         }
 }
+
+.loadMoreSentinel {
+	height: 1px;
+	width: 100%;
+}

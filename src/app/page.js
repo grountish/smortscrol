@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowUp,
   BookText,
   ChevronsDown,
   ChevronDown,
@@ -81,6 +82,10 @@ const ART_CURATED_BATCH = 6;
 // Keep a background buffer of already-fetched, unseen candidates so most
 // load-more calls can be served instantly without hitting the network.
 const FEED_BUFFER_TARGET = LOAD_MORE_BATCH_MAX * 3;
+// A load-more round that commits nothing leaves the card count unchanged, so
+// the sentinel observer never sees a change and the feed stalls in silence.
+// Re-arm it by hand a few times, then stop rather than spin.
+const MAX_EMPTY_FEED_ROUNDS = 3;
 // Abort any single external request that stalls, so one slow API can't hold
 // up a whole batch. Empty/aborted sources are simply skipped.
 const FETCH_TIMEOUT_MS = 7000;
@@ -113,7 +118,6 @@ const TOPIC_PREFERENCES_STORAGE_KEY = 'smortscroll:topic-preferences';
 const BREATH_BREAK_SKIP_SESSION_KEY = 'smortscroll:breath-break-skip-session';
 const AUTO_SCROLL_STEP_PX = 100;
 const AUTO_SCROLL_STEP_MS = 5500;
-const FALLBACK_IMAGE_URL = '/icons/icon-512.png';
 const BREATH_BREAK_INTERVAL_MS = 5 * 60 * 1000;
 const MINDFUL_SCORE_MIN = 0;
 const MINDFUL_SCORE_MAX = 9999;
@@ -566,26 +570,41 @@ function renderFeedColumns(cards, columnCount) {
   ));
 }
 
+// Every axis on which two cards are the same thing to a reader: the id, the
+// page they point at (one Tumblr photoset hands back one card per photo, all
+// sharing a post_url), and the picture itself (the same image syndicated by
+// two sources under different ids).
+function getDedupeKeys(item) {
+  if (!item?.id) {
+    return [];
+  }
+
+  const keys = [`id:${item.id}`];
+  if (item.webUrl) {
+    keys.push(`url:${item.webUrl}`);
+  }
+  if (item.imageUrl) {
+    keys.push(`img:${item.imageUrl}`);
+  }
+  return keys;
+}
+
 function mergeItems(currentItems, nextItems) {
   if (!nextItems.length) {
     return currentItems;
   }
 
-  const seen = new Set(currentItems.map((item) => item.id));
-  const seenImages = new Set(
-    currentItems.map((item) => item.imageUrl).filter(Boolean),
-  );
+  const seen = new Set();
+  currentItems.forEach((item) => {
+    getDedupeKeys(item).forEach((key) => seen.add(key));
+  });
+
   const uniqueNext = nextItems.filter((item) => {
-    if (!item?.id || seen.has(item.id)) {
+    const keys = getDedupeKeys(item);
+    if (!keys.length || keys.some((key) => seen.has(key))) {
       return false;
     }
-    if (item.imageUrl && seenImages.has(item.imageUrl)) {
-      return false;
-    }
-    seen.add(item.id);
-    if (item.imageUrl) {
-      seenImages.add(item.imageUrl);
-    }
+    keys.forEach((key) => seen.add(key));
     return true;
   });
   return [...currentItems, ...uniqueNext];
@@ -966,6 +985,7 @@ export default function HomePage() {
   const [availableVoices, setAvailableVoices] = useState([]);
   const [selectedVoiceUri, setSelectedVoiceUri] = useState(null);
   const [showBottomBar, setShowBottomBar] = useState(false);
+  const [feedRound, setFeedRound] = useState(0);
   const [isAmbientPlaying, setIsAmbientPlaying] = useState(false);
   const [mindfulScore, setMindfulScore] = useState(0);
   const [openMenuSlot, setOpenMenuSlot] = useState(null);
@@ -1005,6 +1025,12 @@ export default function HomePage() {
   const favoriteIdsRef = useRef(new Set());
   const favoriteItemsRef = useRef([]);
   const viewedIdsRef = useRef(new Set());
+  // Dedupe keys for every card ever committed to the feed this session. The
+  // feed list itself is capped at 200, so without this ledger an item that
+  // scrolled off the top stopped counting as a duplicate and came straight
+  // back on the next fetch.
+  const deliveredKeysRef = useRef(new Set());
+  const emptyFeedRoundsRef = useRef(0);
   const speakingItemIdRef = useRef(null);
   const utteranceRef = useRef(null);
   const ambientAudioRef = useRef(null);
@@ -1438,6 +1464,8 @@ export default function HomePage() {
 
   const clearSeenHistory = useCallback(() => {
     exhaustedSourcesRef.current = new Set();
+    deliveredKeysRef.current = new Set();
+    emptyFeedRoundsRef.current = 0;
     seenIdsRef.current = new Set();
     seenItemsRef.current = [];
     viewedIdsRef.current = new Set();
@@ -2205,9 +2233,35 @@ export default function HomePage() {
     const seenImageUrls = new Set(
       seenItemsRef.current.map((item) => item.imageUrl).filter(Boolean),
     );
-    return (item) =>
-      !!item &&
-      (seenIds.has(item.id) || (item.imageUrl && seenImageUrls.has(item.imageUrl)));
+    return (item) => {
+      if (!item) {
+        return true;
+      }
+      if (seenIds.has(item.id) || (item.imageUrl && seenImageUrls.has(item.imageUrl))) {
+        return true;
+      }
+      return getDedupeKeys(item).some((key) => deliveredKeysRef.current.has(key));
+    };
+  }, []);
+
+  // Called at every point a batch is committed to a category, so the next
+  // fetch round can reject the same card before it is ever arranged.
+  const registerDelivered = useCallback((items) => {
+    items.forEach((item) => {
+      getDedupeKeys(item).forEach((key) => deliveredKeysRef.current.add(key));
+    });
+  }, []);
+
+  const noteFeedRound = useCallback((committedCount) => {
+    if (committedCount > 0) {
+      emptyFeedRoundsRef.current = 0;
+      return;
+    }
+
+    emptyFeedRoundsRef.current += 1;
+    if (emptyFeedRoundsRef.current <= MAX_EMPTY_FEED_ROUNDS) {
+      setFeedRound((prev) => prev + 1);
+    }
   }, []);
 
   // Network fan-out only: pull batches until we have variety + enough raw items,
@@ -2335,7 +2389,7 @@ export default function HomePage() {
     }
 
     const isPreviouslySeen = buildSeenPredicate();
-    const claimedIds = new Set();
+    const claimedKeys = new Set();
     const cursorUpdates = [];
     let committed = 0;
     let failures = 0;
@@ -2350,9 +2404,10 @@ export default function HomePage() {
             cursorUpdates.push({ source, cursor: batch.cursor });
           }
 
-          const unseen = items.filter(
-            (item) => item?.id && !claimedIds.has(item.id) && !isPreviouslySeen(item),
-          );
+          const unseen = items.filter((item) => {
+            const keys = getDedupeKeys(item);
+            return keys.length && !keys.some((key) => claimedKeys.has(key)) && !isPreviouslySeen(item);
+          });
 
           if (!unseen.length) {
             if (items.length) {
@@ -2365,7 +2420,9 @@ export default function HomePage() {
 
           const head = unseen.slice(0, FIRST_PAINT_PER_SOURCE);
           const tail = unseen.slice(FIRST_PAINT_PER_SOURCE);
-          head.forEach((item) => claimedIds.add(item.id));
+          head.forEach((item) => {
+            getDedupeKeys(item).forEach((key) => claimedKeys.add(key));
+          });
 
           if (tail.length) {
             feedBufferRef.current = [...feedBufferRef.current, ...tail];
@@ -2381,6 +2438,7 @@ export default function HomePage() {
             performance.mark?.('smortscroll:first-cards');
           }
           committed += active.length;
+          registerDelivered(active);
           setItemsByCategory((prev) => {
             const merged = mergeItems(prev.feed || [], active);
             return { ...prev, feed: merged.slice(-200) };
@@ -2424,6 +2482,7 @@ export default function HomePage() {
     fetchBatch,
     getNextFeedSources,
     keepActiveSourceItems,
+    registerDelivered,
   ]);
 
   // Turn a candidate pool into the arranged batch to display, honoring the
@@ -2560,13 +2619,18 @@ export default function HomePage() {
       prefetchInFlightRef.current = true;
       try {
         const candidates = await gatherFeedCandidates();
-        const existingIds = new Set([
-          ...feedBufferRef.current.map((item) => item.id),
-          ...(itemsByCategoryRef.current.feed || []).map((item) => item.id),
-        ]);
-        const fresh = keepActiveSourceItems(candidates).filter(
-          (item) => item?.id && !existingIds.has(item.id),
-        );
+        const existingKeys = new Set();
+        [...feedBufferRef.current, ...(itemsByCategoryRef.current.feed || [])].forEach((item) => {
+          getDedupeKeys(item).forEach((key) => existingKeys.add(key));
+        });
+        const fresh = keepActiveSourceItems(candidates).filter((item) => {
+          const keys = getDedupeKeys(item);
+          if (!keys.length || keys.some((key) => existingKeys.has(key))) {
+            return false;
+          }
+          keys.forEach((key) => existingKeys.add(key));
+          return true;
+        });
         if (fresh.length) {
           feedBufferRef.current = [...feedBufferRef.current, ...fresh];
         }
@@ -2610,11 +2674,13 @@ export default function HomePage() {
             feedBufferRef.current = keepActiveSourceItems(rest);
             const activeArranged = keepActiveSourceItems(arranged);
             if (activeArranged.length) {
+              registerDelivered(activeArranged);
               setItemsByCategory((prev) => {
                 const merged = mergeItems(prev.feed || [], activeArranged);
                 return { ...prev, feed: merged.slice(-200) };
               });
             }
+            noteFeedRound(activeArranged.length);
           } finally {
             inFlightRef.current.feed = false;
           }
@@ -2650,11 +2716,13 @@ export default function HomePage() {
           feedBufferRef.current = keepActiveSourceItems(rest);
           const activeArranged = keepActiveSourceItems(arranged);
           if (activeArranged.length) {
+            registerDelivered(activeArranged);
             setItemsByCategory((prev) => {
               const merged = mergeItems(prev.feed || [], activeArranged);
               return { ...prev, feed: merged.slice(-200) };
             });
           }
+          noteFeedRound(activeArranged.length);
           schedulePrefetch();
         } else {
           const batch = await fetchBatch(targetCategory);
@@ -2678,6 +2746,7 @@ export default function HomePage() {
 
           const itemsToAdd = unseenItems.slice(0, LOAD_MORE_BATCH_MAX);
 
+          registerDelivered(itemsToAdd);
           setItemsByCategory((prev) => {
             const merged = mergeItems(prev[targetCategory] || [], itemsToAdd);
             return { ...prev, [targetCategory]: merged };
@@ -2709,6 +2778,8 @@ export default function HomePage() {
       gatherFeedCandidates,
       keepActiveSourceItems,
       loadFirstFeedPaint,
+      noteFeedRound,
+      registerDelivered,
       schedulePrefetch,
     ],
   );
@@ -2747,6 +2818,7 @@ export default function HomePage() {
     }
 
     exhaustedSourcesRef.current = new Set();
+    emptyFeedRoundsRef.current = 0;
     feedBufferRef.current = [];
     feedSourceOrderRef.current = shuffleArray(activeFeedSources);
     feedSourceIndexRef.current = 0;
@@ -3759,6 +3831,14 @@ export default function HomePage() {
     setIsLargeText((prev) => !prev);
   }, []);
 
+  const scrollToTop = useCallback(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
   useEffect(() => {
     if (typeof window === 'undefined') {
       return;
@@ -4136,18 +4216,24 @@ export default function HomePage() {
     };
   }, [selectedTextItemId]);
 
+  // Swapping a broken image for one shared placeholder turned every card whose
+  // host blocks us (the Art Institute's IIIF endpoint sits behind a Cloudflare
+  // challenge) into the same icon tile, so a screen of distinct artworks read
+  // as the same picture repeated. Drop the image instead and let the card
+  // stand on its text.
   const handleImageLoadError = useCallback((event) => {
     const image = event.currentTarget;
     if (!image) {
       return;
     }
 
-    if (image.dataset.fallbackApplied === 'true') {
+    const button = image.closest('.imageButton');
+    if (button) {
+      button.remove();
       return;
     }
 
-    image.dataset.fallbackApplied = 'true';
-    image.src = FALLBACK_IMAGE_URL;
+    image.remove();
   }, []);
 
   useEffect(() => {
@@ -4224,7 +4310,9 @@ export default function HomePage() {
       },
       {
         rootMargin: '500px 0px',
-        threshold: 0.01,
+        // A zero-ratio threshold on purpose: the sentinel is a 1px sliver, and
+        // anything above 0 never matches a target that thin.
+        threshold: 0,
       },
     );
 
@@ -4243,6 +4331,7 @@ export default function HomePage() {
   }, [
     category,
     errorByCategory.feed,
+    feedRound,
     filteredItems.length,
     loadMore,
     loadingByCategory.feed,
@@ -4448,24 +4537,6 @@ export default function HomePage() {
                 ) : (
                   <Play size={CONTROL_ICON_SIZE} aria-hidden="true" />
                 )}
-              </button>
-
-              <button
-                className="installButton"
-                type="button"
-                onClick={cycleThemeMode}
-                aria-label={`Switch theme. Current: ${themeLabel}. Next: ${nextThemeLabel}.`}
-                title={`Theme: ${themeLabel}`}>
-                <ThemeIcon size={CONTROL_ICON_SIZE} aria-hidden="true" />
-              </button>
-
-              <button
-                className={`installButton${isLargeText ? ' installButtonActive' : ''}`}
-                type="button"
-                onClick={toggleTextSize}
-                aria-label={isLargeText ? 'Use normal text size' : 'Use larger text size'}
-                title={isLargeText ? 'Text: normal' : 'Text: larger'}>
-                <Type size={CONTROL_ICON_SIZE} aria-hidden="true" />
               </button>
             </div>
           </div>
@@ -4685,7 +4756,9 @@ export default function HomePage() {
             </button>
           </div>
         ) : null}
-        {category === 'feed' ? <div ref={loadMoreSentinelRef} aria-hidden="true" /> : null}
+        {category === 'feed' ? (
+          <div ref={loadMoreSentinelRef} className="loadMoreSentinel" aria-hidden="true" />
+        ) : null}
       </footer>
 
       {activeImage ? (
@@ -4923,7 +4996,7 @@ export default function HomePage() {
                 ))
               )}
             </select>
-            <div className="menuIconRow" aria-label="Upcoming tools">
+            <div className="menuIconRow" aria-label="Display and reading tools">
               <button
                 className={`menuIconButton${showReadingGuide ? ' menuIconButtonActive' : ''}`}
                 type="button"
@@ -4950,6 +5023,23 @@ export default function HomePage() {
                 aria-label="Start breathing exercise"
                 title="Start breathing exercise">
                 <Leaf size={14} aria-hidden="true" />
+              </button>
+              <button
+                className="menuIconButton"
+                type="button"
+                onClick={cycleThemeMode}
+                aria-label={`Switch theme. Current: ${themeLabel}. Next: ${nextThemeLabel}.`}
+                title={`Theme: ${themeLabel}`}>
+                <ThemeIcon size={14} aria-hidden="true" />
+              </button>
+              <button
+                className={`menuIconButton${isLargeText ? ' menuIconButtonActive' : ''}`}
+                type="button"
+                onClick={toggleTextSize}
+                aria-pressed={isLargeText}
+                aria-label={isLargeText ? 'Use normal text size' : 'Use larger text size'}
+                title={isLargeText ? 'Text: normal' : 'Text: larger'}>
+                <Type size={14} aria-hidden="true" />
               </button>
             </div>
             {renderTopicControls(openMenuSlot)}
@@ -5059,19 +5149,10 @@ export default function HomePage() {
               <button
                 className="installButton"
                 type="button"
-                onClick={cycleThemeMode}
-                aria-label={`Switch theme. Current: ${themeLabel}. Next: ${nextThemeLabel}.`}
-                title={`Theme: ${themeLabel}`}>
-                <ThemeIcon size={CONTROL_ICON_SIZE} aria-hidden="true" />
-              </button>
-
-              <button
-                className={`installButton${isLargeText ? ' installButtonActive' : ''}`}
-                type="button"
-                onClick={toggleTextSize}
-                aria-label={isLargeText ? 'Use normal text size' : 'Use larger text size'}
-                title={isLargeText ? 'Text: normal' : 'Text: larger'}>
-                <Type size={CONTROL_ICON_SIZE} aria-hidden="true" />
+                onClick={scrollToTop}
+                aria-label="Go to top"
+                title="Go to top">
+                <ArrowUp size={CONTROL_ICON_SIZE} aria-hidden="true" />
               </button>
 
               <div
