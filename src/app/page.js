@@ -101,7 +101,6 @@ const HIDDEN_STORAGE_KEY = 'smortscroll:hidden-ids';
 const SEEN_ITEMS_STORAGE_KEY = 'smortscroll:seen-items';
 const FAVORITES_STORAGE_KEY = 'smortscroll:favorite-ids';
 const FAVORITES_ITEMS_STORAGE_KEY = 'smortscroll:favorite-items';
-const VOICE_STORAGE_KEY = 'smortscroll:voice-uri';
 const CURSOR_STORAGE_KEY = 'smortscroll:cursor';
 const THEME_STORAGE_KEY = 'smortscroll:theme';
 const TEXT_SIZE_STORAGE_KEY = 'smortscroll:text-size';
@@ -1296,7 +1295,6 @@ export default function HomePage() {
       [
         THEME_STORAGE_KEY,
         TEXT_SIZE_STORAGE_KEY,
-        VOICE_STORAGE_KEY,
         CURSOR_STORAGE_KEY,
         READING_GUIDE_STORAGE_KEY,
         AUTO_SCROLL_STORAGE_KEY,
@@ -3325,16 +3323,8 @@ export default function HomePage() {
         return;
       }
 
-      let storedVoice = null;
-      try {
-        storedVoice = window.localStorage.getItem(VOICE_STORAGE_KEY);
-      } catch {
-        // Ignore storage read failures.
-      }
-
-      const preferred = voices.find((voice) => voice.voiceURI === storedVoice) || voices[0];
       if (!selectedVoiceUri) {
-        setSelectedVoiceUri(preferred?.voiceURI || null);
+        setSelectedVoiceUri(voices[0]?.voiceURI || null);
       }
     };
 
@@ -3474,29 +3464,6 @@ export default function HomePage() {
       window.speechSynthesis.speak(utterance);
     },
     [selectedVoice, stopReadAloud],
-  );
-
-  const selectVoice = useCallback(
-    (voiceUri) => {
-      if (!voiceUri) {
-        return;
-      }
-
-      setSelectedVoiceUri(voiceUri);
-
-      if (typeof window !== 'undefined') {
-        try {
-          window.localStorage.setItem(VOICE_STORAGE_KEY, voiceUri);
-        } catch {
-          // Ignore storage write failures.
-        }
-      }
-
-      if (speakingItemIdRef.current) {
-        stopReadAloud();
-      }
-    },
-    [stopReadAloud],
   );
 
   const toggleSettingsMenu = useCallback((slot) => {
@@ -4515,12 +4482,8 @@ export default function HomePage() {
                   onClick={() => toggleSettingsMenu('top')}
                   aria-haspopup="dialog"
                   aria-expanded={openMenuSlot === 'top'}
-                  aria-label={
-                    selectedVoice
-                      ? `Voice settings. Current: ${selectedVoice.name}`
-                      : 'Voice settings'
-                  }
-                  title={selectedVoice ? `Voice: ${selectedVoice.name}` : 'Voice settings'}>
+                  aria-label="Settings"
+                  title="Settings">
                   <Settings2 size={CONTROL_ICON_SIZE} aria-hidden="true" />
                   <ChevronDown size={12} aria-hidden="true" className="menuChevron" />
                 </button>
@@ -4974,28 +4937,7 @@ export default function HomePage() {
             aria-modal="true"
             aria-labelledby="settings-dialog-title"
             onClick={(event) => event.stopPropagation()}>
-            <h3 id="settings-dialog-title">Voice and settings</h3>
-            <label className="dropdownLabel" htmlFor="voice-select-modal">
-              Voice
-            </label>
-            <select
-              id="voice-select-modal"
-              className="dropdownSelect"
-              value={selectedVoiceUri || ''}
-              onChange={(event) => {
-                selectVoice(event.target.value);
-              }}
-              disabled={!availableVoices.length}>
-              {!availableVoices.length ? (
-                <option value="">No voices available</option>
-              ) : (
-                availableVoices.map((voice) => (
-                  <option key={voice.voiceURI} value={voice.voiceURI}>
-                    {voice.name}
-                  </option>
-                ))
-              )}
-            </select>
+            <h3 id="settings-dialog-title">Settings</h3>
             <div className="menuIconRow" aria-label="Display and reading tools">
               <button
                 className={`menuIconButton${showReadingGuide ? ' menuIconButtonActive' : ''}`}
@@ -5122,12 +5064,8 @@ export default function HomePage() {
                   onClick={() => toggleSettingsMenu('bottom')}
                   aria-haspopup="dialog"
                   aria-expanded={openMenuSlot === 'bottom'}
-                  aria-label={
-                    selectedVoice
-                      ? `Voice settings. Current: ${selectedVoice.name}`
-                      : 'Voice settings'
-                  }
-                  title={selectedVoice ? `Voice: ${selectedVoice.name}` : 'Voice settings'}>
+                  aria-label="Settings"
+                  title="Settings">
                   <Settings2 size={CONTROL_ICON_SIZE} aria-hidden="true" />
                   <ChevronDown size={12} aria-hidden="true" className="menuChevron" />
                 </button>
