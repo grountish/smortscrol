@@ -24,6 +24,8 @@ const SEED_CHANNEL_SLUGS = (process.env.ARENA_SEED_CHANNELS || '')
     'layout-hierarchy-aesthetics',
     'mood-board-ee1vlpuw3ou',
     'design-0zjlgvqp50w',
+    'text-type-eljtur8wfqg',
+    'design-bootloader',
   ]);
 
 // Changing the seed list has to invalidate the harvested graph, which outlives
