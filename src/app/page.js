@@ -112,6 +112,19 @@ const AUTO_SCROLL_STORAGE_KEY = 'smortscroll:auto-scroll';
 // which took the (tiny, deliberate) favourites down with it.
 const MAX_STORED_SEEN_ITEMS = 400;
 const SEEN_RETRY_SIZES = [200, 100, 40, 0];
+// Hashed dedupe keys of every card ever put in the feed. This, not the seen
+// history above, is what stops repeats across reloads: seen history only counts
+// cards that crossed the view threshold (never true of a card taller than the
+// screen, nor of anything passed under auto-scroll), and stores whole items, so
+// it cannot be kept long. A key is ~11 characters, so 9000 of them (about 3000
+// cards) stays near 130KB.
+const DELIVERED_KEYS_STORAGE_KEY = 'smortscroll:delivered-keys';
+const MAX_STORED_DELIVERED_KEYS = 9000;
+const DELIVERED_RETRY_SIZES = [4000, 1500, 0];
+// A source page that comes back entirely seen is not proof the source is spent:
+// its cursor moved on, and the next page may be fresh. Only bench a source after
+// this many all-seen pages in a row.
+const EXHAUSTED_AFTER_SEEN_PAGES = 3;
 
 const TOPIC_PREFERENCES_STORAGE_KEY = 'smortscroll:topic-preferences';
 const BREATH_BREAK_SKIP_SESSION_KEY = 'smortscroll:breath-break-skip-session';
@@ -569,23 +582,93 @@ function renderFeedColumns(cards, columnCount) {
   ));
 }
 
+// cyrb53: a fast 53-bit string hash. Keys only ever need set membership, and
+// a short hash keeps the persisted ledger small enough to hold thousands.
+function hashKey(value) {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+
+// Collapse the spellings of one address: scheme, www, query, fragment and a
+// trailing slash. Dropping the query is deliberate: no source here tells two
+// pages or pictures apart by query alone, while Are.na and the CDNs vary it
+// per request.
+function normalizeUrl(url) {
+  try {
+    const parsed = new URL(url, 'https://local');
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    const path = decodeURIComponent(parsed.pathname).replace(/\/+$/, '');
+    return `${host}${path}`;
+  } catch {
+    return String(url).trim().toLowerCase();
+  }
+}
+
+// Same picture, different file: hosts that serve one image at several sizes
+// or from several shards would otherwise count as distinct cards.
+function normalizeImageUrl(url) {
+  const base = normalizeUrl(url);
+
+  // Tumblr: every reblog of a picture points at the same media hash and file,
+  // spread over numbered shards (64.media, 66.media...) and size variants
+  // (a s1280x1920/ folder, or a _1280 suffix on older files).
+  const tumblr = base.match(/^\d*\.?media\.tumblr\.com\/([^/]+)\/.*?([^/]+?)(?:_\d+)?\.\w+$/);
+  if (tumblr) {
+    return `tumblr-media:${tumblr[1]}/${tumblr[2]}`;
+  }
+
+  return (
+    base
+      // Wikimedia: .../commons/thumb/a/ab/File.jpg/320px-File.jpg -> .../commons/a/ab/File.jpg
+      .replace(/^(upload\.wikimedia\.org\/.+?)\/thumb(\/.+?)\/[^/]+$/, '$1$2')
+      // The Met: web-large and original are the same artwork.
+      .replace(/^(images\.metmuseum\.org\/.+?)\/(?:web-large|original)\//, '$1/')
+  );
+}
+
 // Every axis on which two cards are the same thing to a reader: the id, the
 // page they point at (one Tumblr photoset hands back one card per photo, all
-// sharing a post_url), and the picture itself (the same image syndicated by
-// two sources under different ids).
+// sharing a post_url; one Wikipedia article reaches the feed under several
+// topics), and the picture itself (the same image syndicated by two sources
+// under different ids). Hashed, because these are also persisted.
 function getDedupeKeys(item) {
   if (!item?.id) {
     return [];
   }
 
-  const keys = [`id:${item.id}`];
+  const keys = [hashKey(`id:${item.id}`)];
   if (item.webUrl) {
-    keys.push(`url:${item.webUrl}`);
+    keys.push(hashKey(`url:${normalizeUrl(item.webUrl)}`));
   }
   if (item.imageUrl) {
-    keys.push(`img:${item.imageUrl}`);
+    keys.push(hashKey(`img:${normalizeImageUrl(item.imageUrl)}`));
   }
   return keys;
+}
+
+// The candidates that share no key with knownItems or with an earlier candidate.
+function excludeKnownItems(candidates, knownItems) {
+  const known = new Set();
+  knownItems.forEach((item) => {
+    getDedupeKeys(item).forEach((key) => known.add(key));
+  });
+
+  return candidates.filter((item) => {
+    const keys = getDedupeKeys(item);
+    if (!keys.length || keys.some((key) => known.has(key))) {
+      return false;
+    }
+    keys.forEach((key) => known.add(key));
+    return true;
+  });
 }
 
 function mergeItems(currentItems, nextItems) {
@@ -593,20 +676,7 @@ function mergeItems(currentItems, nextItems) {
     return currentItems;
   }
 
-  const seen = new Set();
-  currentItems.forEach((item) => {
-    getDedupeKeys(item).forEach((key) => seen.add(key));
-  });
-
-  const uniqueNext = nextItems.filter((item) => {
-    const keys = getDedupeKeys(item);
-    if (!keys.length || keys.some((key) => seen.has(key))) {
-      return false;
-    }
-    keys.forEach((key) => seen.add(key));
-    return true;
-  });
-  return [...currentItems, ...uniqueNext];
+  return [...currentItems, ...excludeKnownItems(nextItems, currentItems)];
 }
 
 function getShortText(text) {
@@ -1024,11 +1094,13 @@ export default function HomePage() {
   const favoriteIdsRef = useRef(new Set());
   const favoriteItemsRef = useRef([]);
   const viewedIdsRef = useRef(new Set());
-  // Dedupe keys for every card ever committed to the feed this session. The
-  // feed list itself is capped at 200, so without this ledger an item that
-  // scrolled off the top stopped counting as a duplicate and came straight
-  // back on the next fetch.
+  // Dedupe keys for every card ever committed to the feed, loaded from and
+  // saved to DELIVERED_KEYS_STORAGE_KEY. The feed list itself is capped at 200,
+  // so without this ledger an item that scrolled off the top stopped counting
+  // as a duplicate and came straight back on the next fetch.
   const deliveredKeysRef = useRef(new Set());
+  // Consecutive all-seen pages per source; see EXHAUSTED_AFTER_SEEN_PAGES.
+  const seenPageStreakRef = useRef(new Map());
   const emptyFeedRoundsRef = useRef(0);
   const speakingItemIdRef = useRef(null);
   const utteranceRef = useRef(null);
@@ -1362,6 +1434,14 @@ export default function HomePage() {
         writeStorageKey(SEEN_ITEMS_STORAGE_KEY, storedSeen.slice(0, size)),
       );
     }
+
+    // A Set iterates in insertion order, so the tail is the most recent cards.
+    const storedKeys = Array.from(deliveredKeysRef.current).slice(-MAX_STORED_DELIVERED_KEYS);
+    if (!writeStorageKey(DELIVERED_KEYS_STORAGE_KEY, storedKeys)) {
+      DELIVERED_RETRY_SIZES.some((size) =>
+        writeStorageKey(DELIVERED_KEYS_STORAGE_KEY, size ? storedKeys.slice(-size) : []),
+      );
+    }
   }, []);
 
   const queueSeenSave = useCallback(() => {
@@ -1462,6 +1542,7 @@ export default function HomePage() {
 
   const clearSeenHistory = useCallback(() => {
     exhaustedSourcesRef.current = new Set();
+    seenPageStreakRef.current = new Map();
     deliveredKeysRef.current = new Set();
     emptyFeedRoundsRef.current = 0;
     seenIdsRef.current = new Set();
@@ -2221,33 +2302,54 @@ export default function HomePage() {
     return batch;
   }, [activeFeedSources]);
 
-  // Fresh predicate over the current seen id/image sets. Built once per call
-  // (refs are stable, so no dep churn).
+  // Fresh predicate over hidden ids, seen history and the delivered ledger.
+  // Built once per call (refs are stable, so no dep churn). Seen history is
+  // checked on every key, not just id and picture, so an imageless article that
+  // returns under another topic's id is still caught by its page URL.
   const buildSeenPredicate = useCallback(() => {
-    const seenIds = new Set([
-      ...Array.from(seenIdsRef.current),
-      ...seenItemsRef.current.map((item) => item.id),
-    ]);
-    const seenImageUrls = new Set(
-      seenItemsRef.current.map((item) => item.imageUrl).filter(Boolean),
-    );
+    const seenKeys = new Set();
+    seenItemsRef.current.forEach((item) => {
+      getDedupeKeys(item).forEach((key) => seenKeys.add(key));
+    });
     return (item) => {
       if (!item) {
         return true;
       }
-      if (seenIds.has(item.id) || (item.imageUrl && seenImageUrls.has(item.imageUrl))) {
+      if (seenIdsRef.current.has(item.id)) {
         return true;
       }
-      return getDedupeKeys(item).some((key) => deliveredKeysRef.current.has(key));
+      return getDedupeKeys(item).some(
+        (key) => seenKeys.has(key) || deliveredKeysRef.current.has(key),
+      );
     };
   }, []);
 
   // Called at every point a batch is committed to a category, so the next
   // fetch round can reject the same card before it is ever arranged.
-  const registerDelivered = useCallback((items) => {
-    items.forEach((item) => {
-      getDedupeKeys(item).forEach((key) => deliveredKeysRef.current.add(key));
-    });
+  const registerDelivered = useCallback(
+    (items) => {
+      items.forEach((item) => {
+        getDedupeKeys(item).forEach((key) => deliveredKeysRef.current.add(key));
+      });
+      queueSeenSave();
+    },
+    [queueSeenSave],
+  );
+
+  // Record whether a source's latest page had anything unseen, and bench it
+  // once it has come back all-seen EXHAUSTED_AFTER_SEEN_PAGES times running.
+  const noteSourcePage = useCallback((source, hasUnseen) => {
+    if (hasUnseen) {
+      seenPageStreakRef.current.delete(source);
+      exhaustedSourcesRef.current.delete(source);
+      return;
+    }
+
+    const streak = (seenPageStreakRef.current.get(source) || 0) + 1;
+    seenPageStreakRef.current.set(source, streak);
+    if (streak >= EXHAUSTED_AFTER_SEEN_PAGES) {
+      exhaustedSourcesRef.current.add(source);
+    }
   }, []);
 
   const noteFeedRound = useCallback((committedCount) => {
@@ -2317,13 +2419,11 @@ export default function HomePage() {
         const batch = entry.result.value;
         const unseenFromSource = batch.items.filter((item) => !isSeenNow(item));
 
-        if (!unseenFromSource.length) {
-          // Every release this source can still hand us is already in the seen
-          // history. Boomkat's RSS is a fixed ~195-entry window whose offset
-          // wraps to 0, so without this it would loop the same albums forever.
-          exhaustedSourcesRef.current.add(entry.source);
-        } else {
-          exhaustedSourcesRef.current.delete(entry.source);
+        // A source that keeps handing back only seen cards is benched. Boomkat's
+        // RSS is a fixed ~195-entry window whose offset wraps to 0, so without
+        // this it would loop the same albums forever.
+        noteSourcePage(entry.source, unseenFromSource.length > 0);
+        if (unseenFromSource.length) {
           collectedBatches.push(unseenFromSource);
         }
 
@@ -2366,7 +2466,7 @@ export default function HomePage() {
     }
 
     return rawItems;
-  }, [activeFeedSources, buildSeenPredicate, fetchBatch, getNextFeedSources]);
+  }, [activeFeedSources, buildSeenPredicate, fetchBatch, getNextFeedSources, noteSourcePage]);
 
   // Cold-start path. The batched loader collected every source, arranged the
   // whole batch, then committed once, so the first card waited on the slowest
@@ -2407,14 +2507,12 @@ export default function HomePage() {
             return keys.length && !keys.some((key) => claimedKeys.has(key)) && !isPreviouslySeen(item);
           });
 
+          if (items.length) {
+            noteSourcePage(source, unseen.length > 0);
+          }
           if (!unseen.length) {
-            if (items.length) {
-              exhaustedSourcesRef.current.add(source);
-            }
             return;
           }
-
-          exhaustedSourcesRef.current.delete(source);
 
           const head = unseen.slice(0, FIRST_PAINT_PER_SOURCE);
           const tail = unseen.slice(FIRST_PAINT_PER_SOURCE);
@@ -2459,7 +2557,7 @@ export default function HomePage() {
     }
 
     if (committed) {
-      return;
+      return committed;
     }
 
     if (failures === sources.length) {
@@ -2469,25 +2567,32 @@ export default function HomePage() {
     const allExhausted = activeFeedSources.every((sourceKey) =>
       exhaustedSourcesRef.current.has(sourceKey),
     );
-    throw new Error(
-      allExhausted
-        ? "You've reached the end of every topic you have enabled. Add a topic, or clear your seen history to start over."
-        : 'Could not fetch feed sources.',
-    );
+    if (allExhausted) {
+      throw new Error(
+        "You've reached the end of every topic you have enabled. Add a topic, or clear your seen history to start over.",
+      );
+    }
+    // Every page this round was already seen, but the cursors moved on. Let the
+    // caller walk further pages rather than report a failure.
+    return 0;
   }, [
     activeFeedSources,
     buildSeenPredicate,
     fetchBatch,
     getNextFeedSources,
     keepActiveSourceItems,
+    noteSourcePage,
     registerDelivered,
   ]);
 
   // Turn a candidate pool into the arranged batch to display, honoring the
   // Tumblr/local cadence, and return the untouched remainder for the buffer.
   const buildFeedBatch = useCallback(
-    async (pool, existingFeedCount) => {
+    async (candidatePool, existingFeedCount) => {
       const isPreviouslySeen = buildSeenPredicate();
+      // Buffered cards can go stale: a twin from another source may have been
+      // delivered since they were buffered.
+      const pool = candidatePool.filter((item) => !isPreviouslySeen(item));
       let selectedFeedItems = pickBalancedFeedItems(pool, LOAD_MORE_BATCH_MAX);
 
       const requiredTumblrSlots = countCadenceSlots(
@@ -2509,11 +2614,13 @@ export default function HomePage() {
             }));
           }
 
-          const existingIds = new Set(selectedFeedItems.map((item) => item.id));
           const shortage = requiredTumblrSlots - selectedTumblrCount;
-          const extraTumblrItems = (Array.isArray(tumblrBatch?.items) ? tumblrBatch.items : [])
-            .filter((item) => item?.id && !existingIds.has(item.id) && !isPreviouslySeen(item))
-            .slice(0, shortage);
+          const extraTumblrItems = excludeKnownItems(
+            (Array.isArray(tumblrBatch?.items) ? tumblrBatch.items : []).filter(
+              (item) => !isPreviouslySeen(item),
+            ),
+            selectedFeedItems,
+          ).slice(0, shortage);
 
           if (extraTumblrItems.length) {
             const tumblrItems = selectedFeedItems.filter(
@@ -2554,11 +2661,13 @@ export default function HomePage() {
             }));
           }
 
-          const existingIds = new Set(selectedFeedItems.map((item) => item.id));
           const shortage = requiredLocalSlots - selectedLocalCount;
-          const extraLocalItems = (Array.isArray(localBatch?.items) ? localBatch.items : [])
-            .filter((item) => item?.id && !existingIds.has(item.id) && !isPreviouslySeen(item))
-            .slice(0, shortage);
+          const extraLocalItems = excludeKnownItems(
+            (Array.isArray(localBatch?.items) ? localBatch.items : []).filter(
+              (item) => !isPreviouslySeen(item),
+            ),
+            selectedFeedItems,
+          ).slice(0, shortage);
 
           if (extraLocalItems.length) {
             const localItems = selectedFeedItems.filter(
@@ -2581,8 +2690,9 @@ export default function HomePage() {
       }
 
       const arranged = arrangeFeedWithCadence(selectedFeedItems, existingFeedCount);
-      const usedIds = new Set(arranged.map((item) => item.id));
-      const rest = pool.filter((item) => item?.id && !usedIds.has(item.id));
+      // Also drops a pool card that is another spelling of an arranged one, and
+      // in-pool twins (the slow path pools the buffer with fresh candidates).
+      const rest = excludeKnownItems(pool, arranged);
       return { arranged, rest };
     },
     [buildSeenPredicate, enabledSources, fetchBatch],
@@ -2617,18 +2727,10 @@ export default function HomePage() {
       prefetchInFlightRef.current = true;
       try {
         const candidates = await gatherFeedCandidates();
-        const existingKeys = new Set();
-        [...feedBufferRef.current, ...(itemsByCategoryRef.current.feed || [])].forEach((item) => {
-          getDedupeKeys(item).forEach((key) => existingKeys.add(key));
-        });
-        const fresh = keepActiveSourceItems(candidates).filter((item) => {
-          const keys = getDedupeKeys(item);
-          if (!keys.length || keys.some((key) => existingKeys.has(key))) {
-            return false;
-          }
-          keys.forEach((key) => existingKeys.add(key));
-          return true;
-        });
+        const fresh = excludeKnownItems(keepActiveSourceItems(candidates), [
+          ...feedBufferRef.current,
+          ...(itemsByCategoryRef.current.feed || []),
+        ]);
         if (fresh.length) {
           feedBufferRef.current = [...feedBufferRef.current, ...fresh];
         }
@@ -2699,8 +2801,7 @@ export default function HomePage() {
         if (targetCategory === 'feed') {
           // Nothing on screen yet: stream sources in so the first card paints as
           // soon as any one source lands, rather than after the slowest.
-          if (!(itemsByCategoryRef.current.feed || []).length) {
-            await loadFirstFeedPaint();
+          if (!(itemsByCategoryRef.current.feed || []).length && (await loadFirstFeedPaint())) {
             schedulePrefetch();
             return;
           }
@@ -2816,6 +2917,7 @@ export default function HomePage() {
     }
 
     exhaustedSourcesRef.current = new Set();
+    seenPageStreakRef.current = new Map();
     emptyFeedRoundsRef.current = 0;
     feedBufferRef.current = [];
     feedSourceOrderRef.current = shuffleArray(activeFeedSources);
@@ -2983,9 +3085,21 @@ export default function HomePage() {
       const storedFavoriteIds = window.localStorage.getItem(FAVORITES_STORAGE_KEY);
       const storedFavoriteItems = window.localStorage.getItem(FAVORITES_ITEMS_STORAGE_KEY);
       const storedCursors = window.localStorage.getItem(CURSOR_STORAGE_KEY);
+      const storedDeliveredKeys = window.localStorage.getItem(DELIVERED_KEYS_STORAGE_KEY);
 
       if (!active) {
         return;
+      }
+
+      if (storedDeliveredKeys) {
+        try {
+          const parsed = JSON.parse(storedDeliveredKeys);
+          if (Array.isArray(parsed)) {
+            deliveredKeysRef.current = new Set(parsed);
+          }
+        } catch {
+          // A corrupt ledger only costs some repeats; start a new one.
+        }
       }
 
       if (storedSeenIds) {
